@@ -150,6 +150,22 @@ def test_clean_halo():
     assert (clean[..., 3] > 0).sum() == (native[..., 3] > 0).sum()  # nothing legit removed
 
 
+def test_facing_flips():
+    fence = "`" * 3
+    r = core.parse_facing_report("Sure:\n" + fence + "json\n"
+                                 '{"0": "left", "1": "Left", "2": "left", "3": "right", '
+                                 '"4": "none", "5": "right", "6": "right", "7": "left"}\n' + fence)
+    assert r[1] == "left" and r[4] is None and r[7] == "left"
+    # the live wagon run: slot6 = 1, NW (j=2 -> pos 3) came out right-facing, SE (j=6 -> pos 7) left
+    r = core.parse_facing_report('{"0":"left","1":"left","2":"right","3":"none","4":"right","5":"right","6":"left","7":"none"}')
+    assert core.frames_to_flip(r, 1) == [2, 6]
+    # the model reads the input backwards -> all answers inverted first, same corrections result
+    inv = {k: {"left": "right", "right": "left"}.get(v, v) for k, v in r.items()}
+    assert core.frames_to_flip(inv, 1) == [2, 6]
+    assert core.frames_to_flip({}, 1) == [] and core.frames_to_flip(r, 1, n=5) == []
+    assert core.frames_to_flip(core.parse_facing_report("no json here"), 0) == []
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

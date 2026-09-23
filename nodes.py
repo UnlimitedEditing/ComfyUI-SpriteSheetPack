@@ -81,6 +81,13 @@ class SpritePackBuildSheet:
     @classmethod
     def INPUT_TYPES(cls):
         optional = {f"frame_{i}": ("IMAGE",) for i in range(1, 16)}
+        optional["facing_report"] = ("STRING", {"forceInput": True, "tooltip":
+            "Optional JSON from a vision model: which side each frame's front points to, keyed by "
+            "generation order (0 = the input, 1.. = frame_1..). Frames facing the wrong way for their "
+            "orbit slot are mirrored."})
+        optional["front_view"] = ("IMAGE", {"tooltip":
+            "Optional dedicated straight-front render. When order_offset is not 0 (the input was not a "
+            "front view), it replaces output position 0, so the sheet always starts with a true front."})
         return {
             "required": {
                 "native_sprite": ("IMAGE",),
@@ -110,7 +117,8 @@ class SpritePackBuildSheet:
     CATEGORY = "image/sprite sheet"
 
     def build(self, native_sprite, render_scale, max_colors, columns, preview_scale, alpha_threshold,
-              bg_tolerance, despeckle, clean_halo=True, order_offset=0, **frames):
+              bg_tolerance, despeckle, clean_halo=True, order_offset=0, front_view=None,
+              facing_report=None, **frames):
         native = core.binarize_alpha(_tensor_to_rgba(native_sprite), alpha_threshold)
         nh, nw = native.shape[:2]
         palette = core.build_palette(native, max_colors)
@@ -119,11 +127,7 @@ class SpritePackBuildSheet:
         front[idx >= 0, :3] = palette[idx[idx >= 0]]
         front[idx >= 0, 3] = 255
 
-        out, details = [front], []
-        for name in sorted(frames, key=lambda n: int(n.rsplit("_", 1)[-1])):
-            img = frames[name]
-            if img is None:
-                continue
+        def snap(img):
             rgba = core.to_rgba(img[0].detach().cpu().float().numpy())
             rgba = core.remove_border_background(rgba, bg_tolerance)
             rgba = core.binarize_alpha(rgba, alpha_threshold)
@@ -133,15 +137,30 @@ class SpritePackBuildSheet:
                 snapped = core.clean_halo(snapped)
             if despeckle:
                 snapped = core.despeckle(snapped)
-            out.append(core.fit_canvas(snapped, nw, nh))
+            return core.fit_canvas(snapped, nw, nh), detail
+
+        out, details = [front], []
+        for name in sorted(frames, key=lambda n: int(n.rsplit("_", 1)[-1])):
+            img = frames[name]
+            if img is None:
+                continue
+            frame, detail = snap(img)
+            out.append(frame)
             details.append(dict(frame=name, **detail))
 
+        # mirror frames whose front points the wrong way for their slot (still in generation order)
+        flips = core.frames_to_flip(core.parse_facing_report(facing_report), int(order_offset), len(out))
+        for j in flips:
+            out[j] = out[j][:, ::-1].copy()
         k = int(order_offset) % len(out)
         if k:  # out[j] sits at orbit position (k + j): rotate so position 0 comes first
             out = [out[(p - k) % len(out)] for p in range(len(out))]
-            details = details  # per-frame details keep generation order (frame_1..)
+            if front_view is not None:  # the input wasn't a front view: use the dedicated front render
+                out[0], detail = snap(front_view)
+                details.append(dict(frame="front_view", **detail))
         sheet = core.build_sheet(out, columns)
         info = json.dumps({"frames": len(out), "cell": [nw, nh], "palette_size": len(palette), "order_offset": k,
+                           "flipped_frames": flips,
                            "sheet": [sheet.shape[1], sheet.shape[0]], "details": details})
         print(f"[SpritePackBuildSheet] {info}")
         frames_t = torch.from_numpy(np.stack(out).astype(np.float32) / 255.0)

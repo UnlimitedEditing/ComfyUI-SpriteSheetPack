@@ -524,6 +524,60 @@ def prepare_reference(rgba, sprite_width=0, render_scale=8, max_render_side=1024
     return native, padded, k, src_period
 
 
+# --------------------------------------------------------------------------- facing
+
+EXPECTED_FACING_8 = {1: "left", 2: "left", 3: "left", 5: "right", 6: "right", 7: "right"}
+
+
+def parse_facing_report(text):
+    """{"0": "left", "3": "right", ...} from a vision model's answer (fences / prose tolerated).
+    Values normalised to "left" / "right" / None."""
+    import json as _json
+    import re as _re
+    if not text:
+        return {}
+    obj = None
+    for m in _re.finditer(r"\{", text):
+        try:
+            obj, _ = _json.JSONDecoder().raw_decode(text, m.start())
+            break
+        except ValueError:
+            continue
+    if not isinstance(obj, dict):
+        return {}
+    out = {}
+    for k, v in obj.items():
+        try:
+            idx = int(str(k).strip())
+        except ValueError:
+            continue
+        v = str(v).lower()
+        out[idx] = "left" if "left" in v and "right" not in v else "right" if "right" in v and "left" not in v else None
+    return out
+
+
+def frames_to_flip(report, offset, n=8):
+    """Generation-order indices j (1..n-1) whose reported facing contradicts the facing expected at
+    orbit position (offset + j) % n. Index 0 is the input; if the model reads the input's facing the
+    opposite way to what `offset` says, its whole notion of "front" is inverted, so all answers are
+    swapped before comparing. Front/back positions (no expected side) are never flipped."""
+    if n != 8 or not report:
+        return []
+    swap = {"left": "right", "right": "left"}
+    expected_input = EXPECTED_FACING_8.get(offset % n)
+    got_input = report.get(0)
+    invert = bool(expected_input and got_input and got_input != expected_input)
+    flips = []
+    for j in range(1, n):
+        want = EXPECTED_FACING_8.get((offset + j) % n)
+        got = report.get(j)
+        if invert and got:
+            got = swap[got]
+        if want and got and got != want:
+            flips.append(j)
+    return flips
+
+
 def build_sheet(frames, columns=8):
     """List of equal-size native RGBA frames -> sheet RGBA."""
     h, w = frames[0].shape[:2]

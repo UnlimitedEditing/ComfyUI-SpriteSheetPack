@@ -75,8 +75,30 @@ def test_order_offset():
         assert (centre[(k + 1) % 8] == cols[1]).all()
 
 
+def test_front_view_override():
+    build = pkg.NODE_CLASS_MAPPINGS["SpritePackBuildSheet"]()
+    cols = np.array([[i * 30, 255 - i * 30, (i * 70) % 255] for i in range(9)], np.uint8)
+    native = np.zeros((6, 6, 4), np.uint8); native[1:5, 1:5, :3] = cols[0]; native[1:5, 1:5, 3] = 255
+    for j in range(6):
+        native[5, j, :3] = cols[j]; native[5, j, 3] = 255
+    native[0, 0, :3] = cols[8]; native[0, 0, 3] = 255  # palette entry for the front render
+    def flat(c):
+        f = np.full((48, 48, 4), 255, np.uint8); f[8:40, 8:40, :3] = c
+        return to_t(f)
+    frames = {f"frame_{j}": flat(cols[j]) for j in range(1, 8)}
+    front = flat(cols[8])
+    centre = lambda fr: (fr[:, 3, 3, :3].numpy() * 255 + 0.5).astype(int)
+    _, _, fr, _, _ = build.build(to_t(native), 8, 0, 8, 1, 0.5, 24, False, False, 1, front_view=front, **frames)
+    assert (centre(fr)[0] == cols[8]).all()          # position 0 = dedicated front
+    assert (centre(fr)[1] == cols[0]).all()          # input still at its own slot
+    _, _, fr, _, _ = build.build(to_t(native), 8, 0, 8, 1, 0.5, 24, False, False, 0, front_view=front, **frames)
+    assert (centre(fr)[0] == cols[0]).all()          # offset 0: the input IS the front, override ignored
+
+
 if __name__ == "__main__":
     test_prepare_then_build()
     print("ok test_prepare_then_build")
     test_order_offset()
     print("ok test_order_offset")
+    test_front_view_override()
+    print("ok test_front_view_override")
