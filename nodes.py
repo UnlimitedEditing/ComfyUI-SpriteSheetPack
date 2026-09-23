@@ -95,6 +95,11 @@ class SpritePackBuildSheet:
                     "Replace isolated single pixels surrounded by one other colour."}),
                 "clean_halo": ("BOOLEAN", {"default": True, "tooltip":
                     "Remove light anti-aliasing pixels stuck outside the outline."}),
+                "order_offset": ("INT", {"default": 0, "min": 0, "max": 63, "tooltip":
+                    "Where the native sprite belongs in the output order. The frames arrive as "
+                    "[sprite, next, next, ...] around the orbit; with offset k the output starts k "
+                    "steps before the sprite, e.g. a 3/4-view input at orbit position 1 of 8 gets "
+                    "order_offset 1 so the sheet still starts at the front view."}),
             },
             "optional": optional,
         }
@@ -105,7 +110,7 @@ class SpritePackBuildSheet:
     CATEGORY = "image/sprite sheet"
 
     def build(self, native_sprite, render_scale, max_colors, columns, preview_scale, alpha_threshold,
-              bg_tolerance, despeckle, clean_halo=True, **frames):
+              bg_tolerance, despeckle, clean_halo=True, order_offset=0, **frames):
         native = core.binarize_alpha(_tensor_to_rgba(native_sprite), alpha_threshold)
         nh, nw = native.shape[:2]
         palette = core.build_palette(native, max_colors)
@@ -131,8 +136,12 @@ class SpritePackBuildSheet:
             out.append(core.fit_canvas(snapped, nw, nh))
             details.append(dict(frame=name, **detail))
 
+        k = int(order_offset) % len(out)
+        if k:  # out[j] sits at orbit position (k + j): rotate so position 0 comes first
+            out = [out[(p - k) % len(out)] for p in range(len(out))]
+            details = details  # per-frame details keep generation order (frame_1..)
         sheet = core.build_sheet(out, columns)
-        info = json.dumps({"frames": len(out), "cell": [nw, nh], "palette_size": len(palette),
+        info = json.dumps({"frames": len(out), "cell": [nw, nh], "palette_size": len(palette), "order_offset": k,
                            "sheet": [sheet.shape[1], sheet.shape[0]], "details": details})
         print(f"[SpritePackBuildSheet] {info}")
         frames_t = torch.from_numpy(np.stack(out).astype(np.float32) / 255.0)

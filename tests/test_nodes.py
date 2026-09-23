@@ -52,6 +52,31 @@ def test_prepare_then_build():
     print(info)
 
 
+def test_order_offset():
+    build = pkg.NODE_CLASS_MAPPINGS["SpritePackBuildSheet"]()
+    # 8 flat-colour "views"; frame j carries colour index j so the order is readable
+    cols = np.array([[i * 30, 255 - i * 30, (i * 70) % 255] for i in range(8)], np.uint8)
+    native = np.zeros((6, 6, 4), np.uint8); native[1:5, 1:5, :3] = cols[0]; native[1:5, 1:5, 3] = 255
+    frames = {}
+    for j in range(1, 8):
+        f = np.full((48, 48, 4), 255, np.uint8)  # white bg, 8x render of a 6x6 native
+        f[8:40, 8:40, :3] = cols[j]
+        frames[f"frame_{j}"] = to_t(f)
+    # palette comes from the native sprite, so give the colours used below an opaque pixel there
+    for j in range(6):
+        native[5, j, :3] = cols[j]
+        native[5, j, 3] = 255
+    nat_t = to_t(native)
+    for k in (0, 1, 2, 7):
+        _, _, fr, _, info = build.build(nat_t, 8, 0, 8, 1, 0.5, 24, False, False, k, **frames)
+        # frame 0 (the native sprite) must land at output index k
+        centre = (fr[:, 3, 3, :3].numpy() * 255 + 0.5).astype(int)
+        assert (centre[k] == cols[0]).all(), (k, centre[k])
+        assert (centre[(k + 1) % 8] == cols[1]).all()
+
+
 if __name__ == "__main__":
     test_prepare_then_build()
     print("ok test_prepare_then_build")
+    test_order_offset()
+    print("ok test_order_offset")
