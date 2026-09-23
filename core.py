@@ -547,3 +547,33 @@ def palette_swatches(palette, swatch=16):
 
 def upscale_nearest(rgba, factor):
     return np.repeat(np.repeat(rgba, factor, axis=0), factor, axis=1)
+
+
+def save_gif(frames, path, fps=6.0, scale=6, transparent=False, loop=0):
+    """Equal-size native RGBA frames -> looping animated GIF, pixel-exact.
+
+    Pillow only (no ffmpeg/imageio: installing VideoHelperSuite's pip deps downgraded numpy on
+    Graydient's image and broke ComfyUI's startup). All frames share one palette with index 0
+    reserved for the background (white, or GIF-transparent), so pixel-art colours are written
+    exactly -- no per-frame re-quantization, no dithering."""
+    frames = [np.asarray(f) for f in frames]
+    opaque = np.concatenate([f[f[..., 3] > 0][:, :3] for f in frames] or [np.zeros((0, 3), np.uint8)])
+    colours = np.unique(opaque, axis=0) if len(opaque) else np.zeros((0, 3), np.uint8)
+    if len(colours) > 255:  # more than a GIF palette holds: reduce to 255 shared colours
+        colours = build_palette(np.dstack([opaque[None], np.full((1, len(opaque), 1), 255, np.uint8)]), 255)
+    palette = np.vstack([[255, 255, 255], colours]).astype(np.uint8)
+    flat = palette.ravel().tolist() + [0] * (768 - palette.size)
+
+    images = []
+    for f in frames:
+        idx = palette_indices(f, colours) + 1  # transparent (-1) -> background index 0
+        idx = upscale_nearest(idx.astype(np.uint8)[..., None], max(1, int(scale)))[..., 0]
+        im = Image.fromarray(idx, "P")
+        im.putpalette(flat)
+        images.append(im)
+    kwargs = dict(save_all=True, append_images=images[1:], duration=int(round(1000.0 / max(0.1, fps))),
+                  loop=int(loop), disposal=2, optimize=False, background=0)
+    if transparent:
+        kwargs["transparency"] = 0
+    images[0].save(path, format="GIF", **kwargs)
+    return path

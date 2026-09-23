@@ -15,7 +15,16 @@ nodes bracket the image model in a workflow:
    removes the background, and packs the frames into a sheet. It outputs the native sheet, a
    nearest-neighbour preview, the frame batch, and the palette.
 
-Everything is numpy, scipy and Pillow. There are no compiled dependencies and no model weights.
+3. **Sprite Pack: Save Turntable GIF** (`SpritePackSaveGIF`) writes the frames as a looping
+   animated GIF with Pillow alone: pixel-exact colours on one shared palette, a white or transparent
+   background, and a nearest-neighbour upscale. It reports the file under the `gifs` UI key, like
+   VideoHelperSuite does.
+4. **Sprite Pack: Save Image (switchable)** (`SpritePackSaveImage`) is SaveImage with a `disabled`
+   INT input (1 = save nothing). ComfyUI always runs output nodes, so a stock SaveImage cannot be
+   switched off. This one can, for example to return only the GIF on chat front-ends.
+
+Everything is numpy, scipy and Pillow. It does not use ffmpeg, imageio or VideoHelperSuite, whose pip
+dependencies downgraded numpy on one hosted image and stopped ComfyUI from starting. There are no compiled dependencies and no model weights.
 
 ## Outputs
 

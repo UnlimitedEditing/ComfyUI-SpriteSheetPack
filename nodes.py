@@ -140,11 +140,98 @@ class SpritePackBuildSheet:
                 frames_t, _rgba_to_tensor(core.palette_swatches(palette)), info)
 
 
+class SpritePackSaveGIF:
+    """Native frames (e.g. Build Sheet's `frames`) -> looping turntable GIF, written with Pillow only.
+
+    Reports the file under the UI key "gifs" with the same fields VideoHelperSuite uses, so hosts
+    that collect VHS video/GIF outputs pick it up the same way."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames": ("IMAGE",),
+                "fps": ("FLOAT", {"default": 6.0, "min": 0.5, "max": 60.0, "step": 0.5}),
+                "scale": ("INT", {"default": 6, "min": 1, "max": 32, "tooltip": "Nearest-neighbour upscale."}),
+                "transparent_background": ("BOOLEAN", {"default": False}),
+                "filename_prefix": ("STRING", {"default": "sprite_turntable"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("gif_path",)
+    OUTPUT_NODE = True
+    FUNCTION = "save"
+    CATEGORY = "image/sprite sheet"
+
+    def save(self, frames, fps, scale, transparent_background, filename_prefix):
+        import os
+        import folder_paths
+
+        arrs = [core.to_rgba(f.detach().cpu().float().numpy()) for f in frames]
+        h, w = arrs[0].shape[:2]
+        out_dir = folder_paths.get_output_directory()
+        folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+            filename_prefix, out_dir, w * scale, h * scale)
+        file = f"{filename}_{counter:05}_.gif"
+        path = os.path.join(folder, file)
+        core.save_gif(arrs, path, fps=fps, scale=scale, transparent=transparent_background)
+        print(f"[SpritePackSaveGIF] {len(arrs)} frames @ {fps} fps -> {path}")
+        entry = {"filename": file, "subfolder": subfolder, "type": "output", "format": "image/gif",
+                 "frame_rate": fps, "fullpath": path}
+        return {"ui": {"gifs": [entry]}, "result": (path,)}
+
+
+class SpritePackSaveImage:
+    """SaveImage with an off switch. ComfyUI always executes output nodes, so a stock SaveImage
+    cannot be skipped by a switch upstream; this one saves nothing when `disabled` is 1 (an INT so
+    hosts can drive it from a numeric field, e.g. "GIF only" on chat front-ends where a wide sheet
+    does not display well)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "filename_prefix": ("STRING", {"default": "sprite"}),
+                "disabled": ("INT", {"default": 0, "min": 0, "max": 1, "tooltip": "1 = save nothing."}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "save"
+    CATEGORY = "image/sprite sheet"
+
+    def save(self, images, filename_prefix, disabled):
+        if int(disabled) >= 1:
+            return {"ui": {"images": []}}
+        import os
+        import folder_paths
+        from PIL import Image
+
+        h, w = images.shape[1], images.shape[2]
+        folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+            filename_prefix, folder_paths.get_output_directory(), w, h)
+        results = []
+        for i, img in enumerate(images):
+            arr = (img.detach().cpu().float().numpy().clip(0, 1) * 255.0 + 0.5).astype(np.uint8)
+            file = f"{filename}_{counter + i:05}_.png"
+            Image.fromarray(arr, "RGBA" if arr.shape[-1] == 4 else "RGB").save(
+                os.path.join(folder, file), compress_level=4)
+            results.append({"filename": file, "subfolder": subfolder, "type": "output"})
+        return {"ui": {"images": results}}
+
+
 NODE_CLASS_MAPPINGS = {
     "SpritePackPrepare": SpritePackPrepare,
     "SpritePackBuildSheet": SpritePackBuildSheet,
+    "SpritePackSaveGIF": SpritePackSaveGIF,
+    "SpritePackSaveImage": SpritePackSaveImage,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SpritePackPrepare": "Sprite Pack: Prepare Reference",
     "SpritePackBuildSheet": "Sprite Pack: Build Sheet",
+    "SpritePackSaveGIF": "Sprite Pack: Save Turntable GIF",
+    "SpritePackSaveImage": "Sprite Pack: Save Image (switchable)",
 }
