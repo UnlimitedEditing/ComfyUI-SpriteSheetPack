@@ -27,6 +27,12 @@ nodes bracket the image model in a workflow:
    `disabled` is 1. Put it in front of a stock SaveImage on hosts that only collect outputs from
    stock save nodes. Graydient collected nothing from the custom save nodes above.
 
+**Startup numpy repair** (`prestartup_script.py`): some hosted images come up with numpy 1.26
+next to a SciPy that requires numpy 2 or newer, and ComfyUI then dies at `import scipy.signal` before
+any node loads. ComfyUI runs this script before that import. It reads package metadata without
+importing numpy and acts only in that exact mismatch: it installs numpy 2.x within SciPy's declared
+range and drops a stale in-memory numpy.
+
 Everything is numpy, scipy and Pillow. It does not use ffmpeg, imageio or VideoHelperSuite, whose pip
 dependencies downgraded numpy on one hosted image and stopped ComfyUI from starting. There are no compiled dependencies and no model weights.
 
