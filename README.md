@@ -23,6 +23,10 @@ nodes bracket the image model in a workflow:
    INT input (1 = save nothing). ComfyUI always runs output nodes, so a stock SaveImage cannot be
    switched off. This one can, for example to return only the GIF on chat front-ends.
 
+5. **Sprite Pack: Gate** (`SpritePackGate`) passes images through, or passes an empty batch when
+   `disabled` is 1. Put it in front of a stock SaveImage on hosts that only collect outputs from
+   stock save nodes. Graydient collected nothing from the custom save nodes above.
+
 Everything is numpy, scipy and Pillow. It does not use ffmpeg, imageio or VideoHelperSuite, whose pip
 dependencies downgraded numpy on one hosted image and stopped ComfyUI from starting. There are no compiled dependencies and no model weights.
 

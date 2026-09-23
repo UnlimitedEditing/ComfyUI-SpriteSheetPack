@@ -223,15 +223,40 @@ class SpritePackSaveImage:
         return {"ui": {"images": results}}
 
 
+class SpritePackGate:
+    """Pass images through, or an empty batch when `disabled` is 1.
+
+    For hosts that only collect outputs from stock save nodes (Graydient collected nothing from a
+    custom save node): put this in front of a stock SaveImage. An empty batch makes SaveImage save
+    nothing, while the host still sees an ordinary SaveImage output."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "images": ("IMAGE",),
+            "disabled": ("INT", {"default": 0, "min": 0, "max": 1, "tooltip": "1 = output an empty batch."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "gate"
+    CATEGORY = "image/sprite sheet"
+
+    def gate(self, images, disabled):
+        return (images[:0] if int(disabled) >= 1 else images,)
+
+
 NODE_CLASS_MAPPINGS = {
     "SpritePackPrepare": SpritePackPrepare,
     "SpritePackBuildSheet": SpritePackBuildSheet,
     "SpritePackSaveGIF": SpritePackSaveGIF,
     "SpritePackSaveImage": SpritePackSaveImage,
+    "SpritePackGate": SpritePackGate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SpritePackPrepare": "Sprite Pack: Prepare Reference",
     "SpritePackBuildSheet": "Sprite Pack: Build Sheet",
     "SpritePackSaveGIF": "Sprite Pack: Save Turntable GIF",
     "SpritePackSaveImage": "Sprite Pack: Save Image (switchable)",
+    "SpritePackGate": "Sprite Pack: Gate (pass or empty)",
 }
