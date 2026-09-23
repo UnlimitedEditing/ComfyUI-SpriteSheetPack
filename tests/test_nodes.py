@@ -31,9 +31,9 @@ def test_prepare_then_build():
     rgb, alpha = src[..., :3], src[..., 3]
     image = torch.from_numpy(rgb.astype(np.float32) / 255.0)[None]
     mask = torch.from_numpy(1.0 - alpha.astype(np.float32) / 255.0)[None]
-    ref, nat, k, nw, nh, info = prep.prepare(image, 0, 8, 1024, 0.15, 32, 24, mask=mask)
+    ref, nat, k, nw, nh, info = prep.prepare(image, 0, 8, 1024, 0.15, 32, 24, max_render_pixels=1_000_000, mask=mask)
     assert ref.shape[-1] == 3 and nat.shape[-1] == 4
-    assert ref.shape[1] == nh * k and ref.shape[2] == nw * k and ref.shape[1] % 32 == 0
+    assert ref.shape[1] >= nh * k and ref.shape[2] >= nw * k and ref.shape[1] % 32 == 0 and ref.shape[2] % 32 == 0
     nat_np = (nat[0].numpy() * 255 + 0.5).astype(np.uint8)
     # fake "renders": RGBA like the Qwen 2.1 VAE, on white, shifted grids, blur + noise
     frames = {}

@@ -200,6 +200,125 @@ def grid_offset(rgba, k):
     return best(px), best(py)
 
 
+# --------------------------------------------------------------------------- fractional grids
+# AI "pixel art" is not an integer upscale: its art pixels are ~6.4-7.2 px wide and drift across
+# the image (measured on a real Qwen-generated skull). A fixed integer grid either misses the scale
+# entirely (an integer candidate k=32 = 5 x 6.4 won by harmonic coincidence) or drifts out of phase
+# within a few cells. So: estimate a fractional period, then track actual grid lines.
+
+def _period_spectrum(profile, periods):
+    p = profile - profile.mean()
+    n = np.arange(len(p))
+    base = (np.abs(np.fft.rfft(p)) ** 2)[1:].mean()
+    if base <= 0:
+        return np.zeros(len(periods))
+    basis = np.exp(-2j * np.pi * np.outer(1.0 / periods, n))
+    return (np.abs(basis @ p) ** 2) / base
+
+
+def estimate_period(rgba, p_min=2.5, p_max=64.0, min_score=6.0):
+    """Fractional size (rendered px) of one art pixel, or 1.0 if there is no pixel grid.
+
+    The edge profile of a p-grid has spectral power at 1/p and its harmonics. The strongest peak
+    can be a harmonic (p/2, p/3, ...) on sharp art where every harmonic is equally strong, so the
+    answer is the largest multiple m*p_peak that still carries >= 60% of the peak power -- a true
+    fundamental has ~no power at 1/(2p), so multiples beyond it are rejected."""
+    px, py = edge_profiles(rgba)
+    hi = min(p_max, len(px) / 4.0, len(py) / 4.0)
+    if hi <= p_min:
+        return 1.0
+    periods = np.arange(p_min, hi, 0.02)
+    s = _period_spectrum(px, periods) + _period_spectrum(py, periods)
+    i = int(np.argmax(s))
+    if s[i] / 2.0 < min_score:
+        return 1.0
+    p_peak = float(periods[i])
+    best = p_peak
+    for m in range(2, 7):
+        q = p_peak * m
+        if q >= hi:
+            break
+        window = (periods >= q * 0.97) & (periods <= q * 1.03)
+        if window.any() and s[window].max() >= 0.6 * s[i]:
+            best = float(periods[window][np.argmax(s[window])])
+    return best
+
+
+def track_lines(profile, p, length, search=0.35, adapt=0.3):
+    """Grid-line positions (cell boundaries) along one axis for a drifting grid of period ~p.
+
+    Anchor at the strongest edge, then walk both ways: predict the next line at +-p_local, lock
+    onto the strongest edge within +-search*p of the prediction (keep the prediction when there is
+    none -- same-colour runs have no edge), and let p_local follow the observed spacing."""
+    prof = np.asarray(profile, np.float64)
+    if prof.max() <= 0 or p < 1.5:
+        return np.arange(0, length + 1, max(1.0, p)).round().astype(int)
+    floor = 0.08 * prof.max()
+
+    def lock(pred):
+        lo, hi = int(np.floor(pred - search * p)), int(np.ceil(pred + search * p))
+        lo, hi = max(lo, 0), min(hi, length - 1)
+        if hi < lo:
+            return None
+        seg = prof[lo:hi + 1]
+        j = int(np.argmax(seg))
+        return lo + j if seg[j] >= floor else None
+
+    anchor = int(np.argmax(prof))
+    lines = [float(anchor)]
+    for direction in (1, -1):
+        pos, p_local = float(anchor), float(p)
+        while True:
+            pred = pos + direction * p_local
+            if pred < 0 or pred > length:
+                break
+            hit = lock(pred)
+            new = float(hit) if hit is not None else pred
+            spacing = abs(new - pos)
+            if spacing < 0.5 * p:  # locked onto the same edge again; step on
+                new, spacing = pred, p_local
+            p_local = min(max((1 - adapt) * p_local + adapt * spacing, 0.8 * p), 1.25 * p)
+            lines.append(new)
+            pos = new
+    lines = np.unique(np.round(np.clip(lines, 0, length)).astype(int))
+    if lines[0] > 0:
+        lines = np.concatenate([[0], lines]) if lines[0] >= 0.5 * p else np.concatenate([[0], lines[1:]])
+    if lines[-1] < length:
+        lines = np.concatenate([lines, [length]]) if length - lines[-1] >= 0.5 * p else np.concatenate([lines[:-1], [length]])
+    return lines
+
+
+def snap_to_lines(rgba, xs, ys, palette, coverage=0.5):
+    """One palette colour (or transparency) per tracked cell, voted on the cell interior."""
+    idx = palette_indices(rgba, palette)
+    n = len(palette)
+    out = np.zeros((len(ys) - 1, len(xs) - 1, 4), np.uint8)
+    for i in range(len(ys) - 1):
+        y0, y1 = ys[i], ys[i + 1]
+        my = (y1 - y0) // 4
+        for j in range(len(xs) - 1):
+            x0, x1 = xs[j], xs[j + 1]
+            cell = idx[y0:y1, x0:x1]
+            if cell.size == 0 or (cell >= 0).sum() < coverage * cell.size:
+                continue
+            mx = (x1 - x0) // 4
+            inner = idx[y0 + my:y1 - my, x0 + mx:x1 - mx]
+            solid = inner[inner >= 0]
+            if len(solid) == 0:
+                solid = cell[cell >= 0]
+            out[i, j, :3] = palette[np.bincount(solid, minlength=n).argmax()]
+            out[i, j, 3] = 255
+    return out
+
+
+def snap_tracked(rgba, p, palette):
+    """Snap a frame whose art-pixel size is ~p (fractional OK, drift OK). Returns (native, info)."""
+    px, py = edge_profiles(rgba)
+    xs = track_lines(px, p, rgba.shape[1])
+    ys = track_lines(py, p, rgba.shape[0])
+    return snap_to_lines(rgba, xs, ys, palette), {"cells": [len(xs) - 1, len(ys) - 1], "period": round(float(p), 2)}
+
+
 # --------------------------------------------------------------------------- palette
 
 def build_palette(rgba, max_colors=32):
@@ -288,6 +407,33 @@ def downscale_fractional(rgba, scale, palette=None):
     return out
 
 
+def clean_halo(rgba, lum_margin=40, passes=2):
+    """Remove anti-aliasing halo pixels stuck outside the outline.
+
+    AI pixel art blends its dark outline into the (removed) background, leaving lighter fringe
+    pixels that are too far from the background colour to be keyed out. They snap to single
+    opaque cells outside the outline. A halo pixel touches transparency, protrudes (<= 2 opaque
+    4-neighbours; a pixel on a straight edge has 3) and is clearly lighter than the darkest pixel
+    it hangs off. Legit corners and tips are outline-dark, so they stay."""
+    out = rgba.copy()
+    lum = out[..., :3].astype(np.float32) @ np.array([0.299, 0.587, 0.114], np.float32)
+    h, w = out.shape[:2]
+    for _ in range(passes):
+        op = out[..., 3] > 0
+        pad = np.pad(op, 1)
+        count = (pad[:-2, 1:-1].astype(np.int32) + pad[2:, 1:-1] + pad[1:-1, :-2] + pad[1:-1, 2:])
+        removed = 0
+        for y, x in np.argwhere(op & (count >= 1) & (count <= 2)):
+            nl = [lum[yy, xx] for yy, xx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1))
+                  if 0 <= yy < h and 0 <= xx < w and op[yy, xx]]
+            if nl and lum[y, x] > min(nl) + lum_margin:
+                out[y, x, 3] = 0
+                removed += 1
+        if not removed:
+            break
+    return out
+
+
 def despeckle(rgba):
     """Replace single opaque pixels whose 4 neighbours all share one other colour."""
     out = rgba.copy()
@@ -329,42 +475,53 @@ def fit_canvas(rgba, width, height):
 
 
 def prepare_reference(rgba, sprite_width=0, render_scale=8, max_render_side=1024, margin=0.15,
-                      bg_tolerance=24, max_colors=32):
-    """Input sprite (any resolution, real or fake pixel art) -> (native RGBA, reference RGB on white
-    at render_scale, effective render_scale, detected source scale).
+                      bg_tolerance=24, max_colors=32, max_render_pixels=400_000, min_render_scale=4,
+                      halo=True):
+    """Input sprite (any resolution, real or AI 'fake' pixel art) -> (native RGBA, reference RGB on
+    white at the effective render scale, effective render scale, detected source period).
 
-    The native canvas gets `margin` of empty space around the sprite (so rotated views have room)
-    and is padded so native * scale is a multiple of 32 -- Qwen Image 2.1 rounds reference sizes to
-    multiples of 32 with a lanczos resize otherwise, which would smear the pixel grid."""
+    The source period may be fractional and drifting (AI pixel art), so the input is snapped on
+    tracked grid lines. The native canvas gets `margin` of empty space around the sprite (so rotated
+    views have room) and is padded so native * scale is a multiple of 32 -- Qwen Image 2.1 rounds
+    reference sizes to multiples of 32 with a lanczos resize otherwise, smearing the pixel grid.
+    The render scale is lowered (not below min_render_scale) until the reference fits
+    max_render_side and max_render_pixels: 7 edits must fit the job's time budget."""
     rgba = remove_border_background(rgba, bg_tolerance) if rgba[..., 3].min() == 255 else rgba
     rgba = binarize_alpha(rgba)
     if sprite_width and sprite_width > 0:
-        src_scale = rgba.shape[1] / float(sprite_width)
-        native = downscale_fractional(rgba, src_scale) if src_scale > 1.0 else rgba
+        src_period = rgba.shape[1] / float(sprite_width)
     else:
-        src_scale = detect_scale(rgba)
-        if src_scale > 1:
-            native, _ = snap_to_grid(rgba, src_scale, build_palette(rgba, max_colors))
-        else:
-            native = rgba
+        src_period = estimate_period(rgba)
+    if src_period >= 1.5:
+        native, _ = snap_tracked(rgba, src_period, build_palette(rgba, max_colors))
+    else:
+        native = rgba
+    if halo:
+        native = clean_halo(native)
 
     x0, y0, x1, y1 = opaque_bbox(native)
     cw, ch = x1 - x0, y1 - y0
-    side = max(cw, ch)
-    pad = int(math.ceil(side * margin))
-    base_w, base_h = cw + 2 * pad, ch + 2 * pad
+    pad = int(math.ceil(max(cw, ch) * margin))
+    nw, nh = cw + 2 * pad, ch + 2 * pad
+    native = fit_canvas(native, nw, nh)
+
+    def up32(v):
+        return int(math.ceil(v / 32.0) * 32)
 
     k = int(max(1, render_scale))
-    while True:
-        step = 32 // math.gcd(k, 32)
-        nw = int(math.ceil(base_w / step) * step)
-        nh = int(math.ceil(base_h / step) * step)
-        if max(nw, nh) * k <= max_render_side or k <= 2:
+    while k > min_render_scale:
+        rw, rh = up32(nw * k), up32(nh * k)
+        if max(rw, rh) <= max_render_side and rw * rh <= max_render_pixels:
             break
         k -= 1
-    native = fit_canvas(native, nw, nh)
-    ref_rgba = np.repeat(np.repeat(native, k, axis=0), k, axis=1)
-    return native, on_white_rgb(ref_rgba), k, src_scale
+    # pad the RENDERED reference (white) to multiples of 32 rather than the native canvas: the
+    # snapper tracks grid lines, so the grid need not start at 0, and every k stays usable
+    ref = on_white_rgb(upscale_nearest(native, k))
+    rh, rw = up32(ref.shape[0]), up32(ref.shape[1])
+    top, left = (rh - ref.shape[0]) // 2, (rw - ref.shape[1]) // 2
+    padded = np.full((rh, rw, 3), 255, np.uint8)
+    padded[top:top + ref.shape[0], left:left + ref.shape[1]] = ref
+    return native, padded, k, src_period
 
 
 def build_sheet(frames, columns=8):

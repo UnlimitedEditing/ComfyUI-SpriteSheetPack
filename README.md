@@ -28,12 +28,21 @@ Everything is numpy, scipy and Pillow. There are no compiled dependencies and no
 
 ## How the grid is found
 
-- **Scale:** the edge profile of a k-pixel grid is an impulse train of period k, so its spectral
-  power sits at the harmonics h/k. The detector takes the largest k whose mean harmonic power is
-  near the top score. Divisors of k tie with it, and multiples of k score about half.
-- **Offset:** a forward-difference edge profile, summed on each of the k possible grid phases.
+AI "pixel art" is not an integer upscale: its art pixels are fractional (e.g. 6.4-7.2 px) and
+their size drifts across the image. A fixed integer grid either misreads the scale or falls out of
+phase within a few cells, so:
 
-Both are tested on synthetic renders with blur, noise, partial alpha and shifted grids:
+- **Period:** the peak of the edge profile's spectrum on a fine fractional grid of periods. It is
+  then checked against multiples, because on sharp art every harmonic is equally strong and the
+  peak can land on one of them.
+- **Grid lines:** tracked, not fixed. Tracking anchors at the strongest edge, predicts the next
+  line one period away, locks onto the strongest edge near the prediction, and lets the local
+  period follow what it sees.
+- **Halo cleanup:** light anti-aliasing pixels that protrude outside the dark outline are
+  removed (`clean_halo`, on by default).
+
+These are tested on synthetic renders with blur, noise, partial alpha, shifted grids and drifting
+6/7 px cells:
 `python tests/test_core.py` and `python tests/test_nodes.py`.
 
 ## Credits

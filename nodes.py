@@ -39,6 +39,8 @@ class SpritePackPrepare:
                     "Rendered pixels per art pixel for the image model. Lowered automatically "
                     "to respect max_render_side."}),
                 "max_render_side": ("INT", {"default": 1024, "min": 256, "max": 4096, "step": 32}),
+                "max_render_pixels": ("INT", {"default": 400000, "min": 65536, "max": 4194304, "step": 1024,
+                    "tooltip": "Pixel budget per rendered view; render_scale is lowered to fit it."}),
                 "margin": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip":
                     "Empty space around the sprite, as a fraction of its larger side, so rotated "
                     "views have room."}),
@@ -46,6 +48,8 @@ class SpritePackPrepare:
                     "Palette size when the input has to be de-noised. 0 = keep every colour."}),
                 "bg_tolerance": ("INT", {"default": 24, "min": 0, "max": 255, "tooltip":
                     "Colour tolerance for removing a solid background connected to the border."}),
+                "clean_halo": ("BOOLEAN", {"default": True, "tooltip":
+                    "Remove light anti-aliasing pixels stuck outside the outline."}),
             },
             "optional": {"mask": ("MASK",)},
         }
@@ -56,13 +60,13 @@ class SpritePackPrepare:
     CATEGORY = "image/sprite sheet"
 
     def prepare(self, image, sprite_width, render_scale, max_render_side, margin, max_colors,
-                bg_tolerance, mask=None):
+                bg_tolerance, max_render_pixels=400000, clean_halo=True, mask=None):
         rgba = _tensor_to_rgba(image, mask)
         native, ref, k, src_scale = core.prepare_reference(
             rgba, sprite_width=sprite_width, render_scale=render_scale,
             max_render_side=max_render_side, margin=margin, bg_tolerance=bg_tolerance,
-            max_colors=max_colors)
-        info = json.dumps({"source_scale": round(float(src_scale), 3), "render_scale": k,
+            max_colors=max_colors, max_render_pixels=max_render_pixels, halo=clean_halo)
+        info = json.dumps({"source_period": round(float(src_scale), 2), "render_scale": k,
                            "native": [native.shape[1], native.shape[0]],
                            "reference": [ref.shape[1], ref.shape[0]]})
         print(f"[SpritePackPrepare] {info}")
@@ -89,6 +93,8 @@ class SpritePackBuildSheet:
                 "bg_tolerance": ("INT", {"default": 24, "min": 0, "max": 255}),
                 "despeckle": ("BOOLEAN", {"default": False, "tooltip":
                     "Replace isolated single pixels surrounded by one other colour."}),
+                "clean_halo": ("BOOLEAN", {"default": True, "tooltip":
+                    "Remove light anti-aliasing pixels stuck outside the outline."}),
             },
             "optional": optional,
         }
@@ -99,7 +105,7 @@ class SpritePackBuildSheet:
     CATEGORY = "image/sprite sheet"
 
     def build(self, native_sprite, render_scale, max_colors, columns, preview_scale, alpha_threshold,
-              bg_tolerance, despeckle, **frames):
+              bg_tolerance, despeckle, clean_halo=True, **frames):
         native = core.binarize_alpha(_tensor_to_rgba(native_sprite), alpha_threshold)
         nh, nw = native.shape[:2]
         palette = core.build_palette(native, max_colors)
@@ -116,11 +122,14 @@ class SpritePackBuildSheet:
             rgba = core.to_rgba(img[0].detach().cpu().float().numpy())
             rgba = core.remove_border_background(rgba, bg_tolerance)
             rgba = core.binarize_alpha(rgba, alpha_threshold)
-            snapped, offset = core.snap_to_grid(rgba, render_scale, palette)
+            # tracked lines, not a fixed grid: the image model's blocks drift like any AI pixel art
+            snapped, detail = core.snap_tracked(rgba, render_scale, palette)
+            if clean_halo:
+                snapped = core.clean_halo(snapped)
             if despeckle:
                 snapped = core.despeckle(snapped)
             out.append(core.fit_canvas(snapped, nw, nh))
-            details.append({"frame": name, "grid_offset": list(offset)})
+            details.append(dict(frame=name, **detail))
 
         sheet = core.build_sheet(out, columns)
         info = json.dumps({"frames": len(out), "cell": [nw, nh], "palette_size": len(palette),

@@ -77,9 +77,9 @@ def test_prepare_reference_fake_input():
     src = fake_render(native, 12, 4, 9)  # "AI pixel art" input at 12x, on white, opaque bg
     src[..., 3] = 255
     nat, ref, k, src_scale = core.prepare_reference(src, render_scale=8)
-    assert src_scale == 12, src_scale
+    assert abs(src_scale - 12) < 0.1, src_scale  # fractional period estimate
     assert (ref.shape[0] % 32, ref.shape[1] % 32) == (0, 0), ref.shape
-    assert ref.shape[0] == nat.shape[0] * k and ref.shape[1] == nat.shape[1] * k
+    assert ref.shape[0] >= nat.shape[0] * k and ref.shape[1] >= nat.shape[1] * k  # white-padded to x32
     # noisy input -> median-cut palette colours are close to, not equal to, the originals
     assert match_rate(nat, native, tol=16) > 0.95, match_rate(nat, native, tol=16)
 
@@ -107,6 +107,47 @@ def test_end_to_end_sheet():
     assert sheet.shape == (nat.shape[0], nat.shape[1] * 4, 4)
     colours = np.unique(sheet[sheet[..., 3] > 0][:, :3], axis=0)
     assert all(any((c == p).all() for p in pal) for c in colours)  # palette-locked
+
+
+def drift_render(native, periods_x, periods_y, blur=0.8, noise=6.0):
+    """AI-style 'fake' pixel art: every art column/row gets its own width (e.g. 6-7 px)."""
+    xs = np.concatenate([[0], np.cumsum(periods_x)]).astype(int)
+    ys = np.concatenate([[0], np.cumsum(periods_y)]).astype(int)
+    h, w = native.shape[:2]
+    out = np.zeros((ys[-1], xs[-1], 4), np.uint8)
+    for i in range(h):
+        for j in range(w):
+            out[ys[i]:ys[i + 1], xs[j]:xs[j + 1]] = native[i, j]
+    rgb = core.on_white_rgb(out)
+    rgb = np.asarray(Image.fromarray(rgb).filter(ImageFilter.GaussianBlur(blur))).astype(np.float32)
+    rgb += rng.normal(0, noise, rgb.shape)
+    return np.dstack([np.clip(rgb, 0, 255), np.full(rgb.shape[:2], 255.0)]).astype(np.uint8)
+
+
+def test_fractional_drifting_grid():
+    native = make_native(56, 40)
+    px = rng.choice([6, 7], size=56, p=[0.45, 0.55])
+    py = rng.choice([6, 7], size=40, p=[0.45, 0.55])
+    src = drift_render(native, px, py)
+    p = core.estimate_period(core.binarize_alpha(core.remove_border_background(src)))
+    assert 6.0 <= p <= 7.0, p
+    nat, ref, k, sp = core.prepare_reference(src, render_scale=8, halo=False)
+    rate = match_rate(nat, native, tol=16)
+    assert rate > 0.9, rate
+
+
+def test_clean_halo():
+    native = make_native(40, 32)
+    dirty = native.copy()
+    # light single pixels poking out of the dark outline (anti-aliasing halo)
+    ys, xs = np.nonzero(native[..., 3])
+    top = (ys.min(), xs[ys == ys.min()].min())
+    right = (ys[xs == xs.max()].min(), xs.max())
+    dirty[top[0] - 1, top[1]] = [230, 210, 170, 255]
+    dirty[right[0], right[1] + 1] = [230, 210, 170, 255]
+    clean = core.clean_halo(dirty)
+    assert clean[top[0] - 1, top[1], 3] == 0 and clean[right[0], right[1] + 1, 3] == 0
+    assert (clean[..., 3] > 0).sum() == (native[..., 3] > 0).sum()  # nothing legit removed
 
 
 if __name__ == "__main__":
