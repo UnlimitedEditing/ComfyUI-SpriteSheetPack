@@ -27,6 +27,15 @@ nodes bracket the image model in a workflow:
    `disabled` is 1. Put it in front of a stock SaveImage on hosts that only collect outputs from
    stock save nodes. Graydient collected nothing from the custom save nodes above.
 
+6. **Sprite Pack: Standardize Sheet** (`SpritePackStandardizeSheet`) reads any sprite sheet (ours, ripped,
+   hand-drawn; transparent or on a plain background) into one canonical layout: equal-size cells, one row
+   per state, every frame anchored on the same pivot (`feet` = shared ground line and foot x, or `center`).
+   Frames are found from the empty gaps (small specks are folded into their neighbour), or from an exact
+   `columns` x `rows` grid when frames touch. Optional: undo an upscale back to native pixels (`unscale`),
+   lock one shared palette, fix the cell size, name the rows (`labels`). Outputs the sheet, a preview, the
+   frame batch, a text card of the layout, and the layout JSON (`spritepack.sheet` v1: cell, pivot, fps,
+   states with their frame counts). No model, no weights.
+
 **Startup numpy repair** (`prestartup_script.py`): some hosted images come up with numpy 1.26
 next to a SciPy that requires numpy 2 or newer, and ComfyUI then dies at `import scipy.signal` before
 any node loads. ComfyUI runs this script before that import. It reads package metadata without

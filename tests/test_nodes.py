@@ -102,3 +102,15 @@ if __name__ == "__main__":
     print("ok test_order_offset")
     test_front_view_override()
     print("ok test_front_view_override")
+
+
+def test_standardize_node():
+    import test_standardize as ts
+    node = pkg.NODE_CLASS_MAPPINGS["SpritePackStandardizeSheet"]()
+    sheet = ts.make_sheet(bg=(255, 0, 255))
+    rgb = torch.from_numpy(sheet[..., :3].astype(np.float32) / 255.0)[None]
+    out, prev, frames, card, info = node.standardize(rgb, 0, 0, 0, "feet", 0, 0, 1, 1, 0, "idle,attack,hit", 8.0, 4, 0.5, 24)
+    import json
+    meta = json.loads(info)
+    assert meta["frames"] == 9 and frames.shape[0] == 9 and out.shape[-1] == 4 and card.shape[-1] == 3
+    assert prev.shape[1] == out.shape[1] * 4

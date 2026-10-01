@@ -631,3 +631,211 @@ def save_gif(frames, path, fps=6.0, scale=6, transparent=False, loop=0):
         kwargs["transparency"] = 0
     images[0].save(path, format="GIF", **kwargs)
     return path
+
+
+# --------------------------------------------------------------------------- sheet standardiser
+# Read any sprite sheet (ours or an external one) into one canonical layout: equal-size cells,
+# one row per state, every frame anchored on the same pivot. No diffusion, no model weights.
+
+def _runs(flags, min_gap):
+    """[start, end) runs of True in a 1-D bool array; runs closer than min_gap are merged."""
+    runs, start = [], None
+    for i, f in enumerate(flags):
+        if f and start is None:
+            start = i
+        elif not f and start is not None:
+            runs.append([start, i])
+            start = None
+    if start is not None:
+        runs.append([start, len(flags)])
+    merged = []
+    for r in runs:
+        if merged and r[0] - merged[-1][1] < min_gap:
+            merged[-1][1] = r[1]
+        else:
+            merged.append(r)
+    return merged
+
+
+def _merge_specks(segs, weights, frac=0.1):
+    """Fold a segment into its nearest neighbour when it holds < frac of the median pixel count
+    (a stray spark or a detached weapon tip must not become a frame of its own)."""
+    if len(segs) < 3:
+        return segs, weights
+    med = float(np.median(weights))
+    changed = True
+    while changed and len(segs) > 1:
+        changed = False
+        for i, wt in enumerate(weights):
+            if wt < frac * med:
+                gl = segs[i][0] - segs[i - 1][1] if i > 0 else 1 << 30
+                gr = segs[i + 1][0] - segs[i][1] if i < len(segs) - 1 else 1 << 30
+                j = i - 1 if gl <= gr else i + 1
+                lo, hi = min(i, j), max(i, j)
+                segs[lo] = [segs[lo][0], segs[hi][1]]
+                weights[lo] = weights[lo] + weights[hi]
+                del segs[hi], weights[hi]
+                changed = True
+                break
+    return segs, weights
+
+
+def detect_sheet_cells(alpha, columns=0, rows=0, min_gap=0, min_pixels=6):
+    """Find the frames of a sprite sheet from its opacity mask (H, W bool).
+
+    columns and rows both > 0: an exact uniform grid. Otherwise rows are the horizontal bands of
+    opaque pixels, and each band is cut into frames at its empty vertical gaps (wider than min_gap;
+    0 = ~1% of the sheet). Returns (rows, notes): rows = [[(x0, y0, x1, y1), ...], ...]."""
+    h, w = alpha.shape
+    notes = []
+    if columns > 0 and rows > 0:
+        xs = [round(i * w / columns) for i in range(columns + 1)]
+        ys = [round(j * h / rows) for j in range(rows + 1)]
+        out = []
+        for j in range(rows):
+            cells = [(xs[i], ys[j], xs[i + 1], ys[j + 1]) for i in range(columns)]
+            while cells and alpha[cells[-1][1]:cells[-1][3], cells[-1][0]:cells[-1][2]].sum() < min_pixels:
+                cells.pop()  # empty cells at the end of a row are padding, not frames
+            out.append(cells)
+        return out, notes
+    gap = min_gap if min_gap > 0 else max(2, int(round(0.01 * max(w, h))))
+    out = []
+    for y0, y1 in _runs(alpha.any(axis=1), gap):
+        band = alpha[y0:y1]
+        segs = _runs(band.any(axis=0), gap)
+        weights = [float(band[:, a:b].sum()) for a, b in segs]
+        segs, weights = _merge_specks(segs, weights)
+        segs = [s for s, wt in zip(segs, weights) if wt >= min_pixels]
+        if not segs:
+            continue
+        if len(segs) == 1 and (segs[0][1] - segs[0][0]) >= 1.8 * (y1 - y0):
+            # one wide blob: frames that touch. Guess square-ish cells and say so.
+            n = int(round((segs[0][1] - segs[0][0]) / (y1 - y0)))
+            x0, x1 = segs[0]
+            segs = [[round(x0 + i * (x1 - x0) / n), round(x0 + (i + 1) * (x1 - x0) / n)] for i in range(n)]
+            notes.append(f"row at y={y0}: frames touch; guessed {n} equal cells (set columns and rows to override)")
+        out.append([(a, y0, b, y1) for a, b in segs])
+    return out, notes
+
+
+def _foot_pivot(content):
+    """(x, y) of the feet in content coordinates: bottom edge, x = mean of the lowest opaque pixels."""
+    ch = content.shape[0]
+    band = max(1, int(round(ch * 0.12)))
+    ys, xs = np.nonzero(content[ch - band:, :, 3])
+    if len(xs) == 0:
+        return content.shape[1] / 2.0, float(ch)
+    return float(xs.mean()) + 0.5, float(ch)
+
+
+def standardize_sheet(rgba, columns=0, rows=0, min_gap=0, anchor="feet", cell_width=0, cell_height=0,
+                      pad=1, unscale=1, max_colors=0, labels=None, fps=8.0, bg_tolerance=24,
+                      alpha_threshold=0.5, min_pixels=6):
+    """Any sprite sheet (RGBA, any background) -> canonical sheet.
+
+    Returns (sheet RGBA, frames [RGBA, ...] in grid order, meta dict). Cells are equal size, one row
+    per detected row (a state), frames anchored on one pivot: anchor 'feet' = common ground line and
+    foot x, 'center' = bounding-box centre. unscale N > 1 divides an upscaled sheet back to native
+    pixels, 0 detects the factor. max_colors > 0 locks the sheet to one shared palette."""
+    warnings = []
+    rgba = binarize_alpha(rgba, alpha_threshold)
+    if rgba[..., 3].min() == 255:  # no transparency at all: key out the border colour
+        rgba = binarize_alpha(remove_border_background(rgba, bg_tolerance), alpha_threshold)
+    layout, notes = detect_sheet_cells(rgba[..., 3] > 0, columns, rows, min_gap, min_pixels)
+    warnings += notes
+    if not layout:
+        raise ValueError("no sprites found in the sheet (everything is transparent or background)")
+
+    period = 1.0
+    palette = build_palette(rgba, max_colors) if (max_colors > 0 or unscale != 1) else None
+    if unscale == 0:
+        period = estimate_period(rgba)  # whole sheet: more edges than any one frame
+        if period < 1.5:
+            period = 1.0
+            warnings.append("unscale auto: no pixel grid found, kept the sheet as is")
+    elif unscale > 1:
+        period = float(unscale)
+
+    contents = []  # per row: each frame cropped tight to its opaque bbox
+    for row in layout:
+        items = []
+        for x0, y0, x1, y1 in row:
+            region = rgba[y0:y1, x0:x1].copy()
+            if period > 1.0:
+                region, _ = snap_tracked(region, period, palette)
+            elif max_colors > 0:
+                idx = palette_indices(region, palette)
+                region[idx < 0, 3] = 0
+                region[idx >= 0, :3] = palette[idx[idx >= 0]]
+            bx0, by0, bx1, by1 = opaque_bbox(region)
+            items.append(region[by0:by1, bx0:bx1])
+        contents.append(items)
+
+    pivots = [[(c.shape[1] / 2.0, c.shape[0] / 2.0) if anchor == "center" else _foot_pivot(c) for c in items]
+              for items in contents]
+    flat = [(c, p) for items, pv in zip(contents, pivots) for c, p in zip(items, pv)]
+    left = max(p[0] for c, p in flat)
+    right = max(c.shape[1] - p[0] for c, p in flat)
+    up = max(p[1] for c, p in flat)
+    down = max(c.shape[0] - p[1] for c, p in flat)
+    if cell_width > 0 and cell_height > 0:
+        cw, ch = int(cell_width), int(cell_height)
+        px = cw / 2.0
+        py = float(ch - pad) if anchor != "center" else ch / 2.0
+        if left + pad > px or right + pad > cw - px or up + pad > py or down + pad > ch - py:
+            warnings.append(f"some frames are larger than the {cw}x{ch} cell and were cropped")
+    else:
+        cw = int(math.ceil(left + right)) + 2 * pad
+        ch = int(math.ceil(up + down)) + 2 * pad
+        px, py = pad + left, pad + up
+    ox, oy = int(round(px)), int(round(py))
+
+    cols_n = max(len(items) for items in contents)
+    sheet = np.zeros((len(contents) * ch, cols_n * cw, 4), np.uint8)
+    frames = []
+    for r, (items, pv) in enumerate(zip(contents, pivots)):
+        for c, (content, (fx, fy)) in enumerate(zip(items, pv)):
+            cell = np.zeros((ch, cw, 4), np.uint8)
+            dx, dy = ox - int(round(fx)), oy - int(round(fy))
+            sx0, sy0 = max(0, -dx), max(0, -dy)
+            tx0, ty0 = max(0, dx), max(0, dy)
+            wcopy = min(content.shape[1] - sx0, cw - tx0)
+            hcopy = min(content.shape[0] - sy0, ch - ty0)
+            if wcopy > 0 and hcopy > 0:
+                cell[ty0:ty0 + hcopy, tx0:tx0 + wcopy] = content[sy0:sy0 + hcopy, sx0:sx0 + wcopy]
+            sheet[r * ch:(r + 1) * ch, c * cw:(c + 1) * cw] = cell
+            frames.append(cell)
+
+    names = [s.strip() for s in (labels or "").split(",") if s.strip()]
+    states = []
+    for r, items in enumerate(contents):
+        states.append({"name": names[r] if r < len(names) else f"state{r + 1}", "row": r,
+                       "start": r * cols_n, "frames": len(items)})
+    if names and len(names) != len(contents):
+        warnings.append(f"{len(names)} labels given but {len(contents)} rows found")
+    meta = {"format": "spritepack.sheet", "version": 1, "cell": [cw, ch], "columns": cols_n,
+            "rows": len(contents), "pivot": [ox, oy], "anchor": anchor, "fps": fps,
+            "frames": len(frames), "states": states, "sheet": [sheet.shape[1], sheet.shape[0]],
+            "source_unscale": round(period, 2), "palette_size": 0 if palette is None else len(palette),
+            "warnings": warnings}
+    return sheet, frames, meta
+
+
+def text_card(text, width=1024, margin=12):
+    """Monospace text on white as an RGB uint8 image (a readable way to return JSON from hosts that
+    only collect images)."""
+    from PIL import ImageDraw, ImageFont
+    font = ImageFont.load_default()
+    lines = []
+    for raw in text.splitlines() or [""]:
+        line = raw
+        while len(line) > 120:
+            lines.append(line[:120])
+            line = "  " + line[120:]
+        lines.append(line)
+    height = max(64, 2 * margin + 12 * len(lines))
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+    for i, line in enumerate(lines):
+        draw.text((margin, margin + 12 * i), line, fill="black", font=font)
+    return np.asarray(img)

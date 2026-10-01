@@ -251,6 +251,62 @@ class SpritePackSaveImage:
         return {"ui": {"images": results}}
 
 
+class SpritePackStandardizeSheet:
+    """Any sprite sheet (ours, ripped, hand-drawn) -> one canonical sheet: equal-size cells, one row
+    per state, every frame on the same pivot, optionally back at native pixel size and one palette.
+    No model involved. Also reports the layout as JSON for the game engine."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "columns": ("INT", {"default": 0, "min": 0, "max": 64, "tooltip":
+                    "Frames per row. Set columns AND rows for a sheet whose frames touch; 0 = detect from the gaps."}),
+                "rows": ("INT", {"default": 0, "min": 0, "max": 64, "tooltip": "Number of rows (states). 0 = detect."}),
+                "min_gap": ("INT", {"default": 0, "min": 0, "max": 64, "tooltip":
+                    "Empty pixels that separate two frames when detecting. 0 = about 1% of the sheet."}),
+                "anchor": (["feet", "center"], {"tooltip":
+                    "feet: all frames share one ground line and foot position. center: bounding-box centre."}),
+                "cell_width": ("INT", {"default": 0, "min": 0, "max": 2048, "tooltip":
+                    "Fixed cell size (needs both). 0 = the smallest cell that holds every frame."}),
+                "cell_height": ("INT", {"default": 0, "min": 0, "max": 2048}),
+                "pad": ("INT", {"default": 1, "min": 0, "max": 64, "tooltip": "Transparent margin around the frames."}),
+                "unscale": ("INT", {"default": 1, "min": 0, "max": 32, "tooltip":
+                    "Divide an upscaled sheet back to native pixels: 1 = leave, N = the sheet was scaled Nx, 0 = detect."}),
+                "max_colors": ("INT", {"default": 0, "min": 0, "max": 256, "tooltip":
+                    "Lock the sheet to one shared palette of this size. 0 = leave the colours alone."}),
+                "labels": ("STRING", {"default": "", "tooltip":
+                    "State names for the rows, top to bottom, comma separated (idle,attack,hit)."}),
+                "fps": ("FLOAT", {"default": 8.0, "min": 1.0, "max": 60.0, "tooltip": "Playback rate written to the JSON."}),
+                "preview_scale": ("INT", {"default": 4, "min": 1, "max": 32}),
+                "alpha_threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "bg_tolerance": ("INT", {"default": 24, "min": 0, "max": 255, "tooltip":
+                    "Background keying tolerance when the sheet has no transparency."}),
+            },
+            "optional": {"mask": ("MASK",)},
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = ("sheet", "sheet_preview", "frames", "layout_card", "info")
+    FUNCTION = "standardize"
+    CATEGORY = "image/sprite sheet"
+
+    def standardize(self, image, columns, rows, min_gap, anchor, cell_width, cell_height, pad, unscale,
+                    max_colors, labels, fps, preview_scale, alpha_threshold, bg_tolerance, mask=None):
+        rgba = _tensor_to_rgba(image, mask)
+        sheet, frames, meta = core.standardize_sheet(
+            rgba, columns=columns, rows=rows, min_gap=min_gap, anchor=anchor, cell_width=cell_width,
+            cell_height=cell_height, pad=pad, unscale=unscale, max_colors=max_colors, labels=labels,
+            fps=fps, bg_tolerance=bg_tolerance, alpha_threshold=alpha_threshold)
+        info = json.dumps(meta)
+        print(f"[SpritePackStandardizeSheet] {info}")
+        frames_t = torch.from_numpy(np.stack(frames).astype(np.float32) / 255.0)
+        card = core.text_card(json.dumps(meta, indent=1))
+        return (_rgba_to_tensor(sheet), _rgba_to_tensor(core.upscale_nearest(sheet, preview_scale)),
+                frames_t, torch.from_numpy(card.astype(np.float32) / 255.0)[None], info)
+
+
 class SpritePackGate:
     """Pass images through, or an empty batch when `disabled` is 1.
 
@@ -280,6 +336,7 @@ NODE_CLASS_MAPPINGS = {
     "SpritePackSaveGIF": SpritePackSaveGIF,
     "SpritePackSaveImage": SpritePackSaveImage,
     "SpritePackGate": SpritePackGate,
+    "SpritePackStandardizeSheet": SpritePackStandardizeSheet,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SpritePackPrepare": "Sprite Pack: Prepare Reference",
@@ -287,4 +344,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SpritePackSaveGIF": "Sprite Pack: Save Turntable GIF",
     "SpritePackSaveImage": "Sprite Pack: Save Image (switchable)",
     "SpritePackGate": "Sprite Pack: Gate (pass or empty)",
+    "SpritePackStandardizeSheet": "Sprite Pack: Standardize Sheet",
 }
