@@ -114,3 +114,28 @@ def test_standardize_node():
     meta = json.loads(info)
     assert meta["frames"] == 9 and frames.shape[0] == 9 and out.shape[-1] == 4 and card.shape[-1] == 3
     assert prev.shape[1] == out.shape[1] * 4
+
+
+def test_pose_cycle_matches_reference_and_loops():
+    ref = np.full((512, 384, 3), 255, np.uint8)
+    ref[100:460, 140:250] = (90, 60, 40)  # a "character" block
+    node = pkg.NODE_CLASS_MAPPINGS["SpritePackPoseCycle"]()
+    t = torch.from_numpy(ref.astype(np.float32) / 255.0)[None]
+    poses, n, info = node.draw(t, "walk", 8, "right", 24)
+    assert poses.shape == (8, 512, 384, 3) and n == 8
+    arr = (poses.numpy() * 255).astype(np.uint8)
+    assert all(a.any() for a in arr)                      # every frame draws something
+    assert len({a.tobytes() for a in arr}) == 8           # and the cycle actually moves
+    rows = np.where(arr[0].any(-1).any(1))[0]
+    assert rows.min() >= 90 and rows.max() <= 470         # skeleton stays in the figure's height band
+    _, _, _ = node.draw(t, "run", 6, "left", 24)
+    _, _, _ = node.draw(t, "idle", 4, "right", 24)
+
+
+def test_build_sheet_skip_native():
+    build = pkg.NODE_CLASS_MAPPINGS["SpritePackBuildSheet"]()
+    native = tc.make_native(40, 34)
+    frame = to_t(core.upscale_nearest(native, 8))[..., :3]
+    sheet, prev, frames, pal, info = build.build(to_t(native), 8, 32, 4, 2, 0.5, 24, False,
+                                                 skip_native=True, frame_1=frame, frame_2=frame)
+    assert frames.shape[0] == 2

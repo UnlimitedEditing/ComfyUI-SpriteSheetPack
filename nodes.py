@@ -7,7 +7,7 @@ import json
 import numpy as np
 import torch
 
-from . import core
+from . import core, poses
 
 
 def _tensor_to_rgba(image, mask=None):
@@ -85,6 +85,9 @@ class SpritePackBuildSheet:
             "Optional JSON from a vision model: which side each frame's front points to, keyed by "
             "generation order (0 = the input, 1.. = frame_1..). Frames facing the wrong way for their "
             "orbit slot are mirrored."})
+        optional["skip_native"] = ("BOOLEAN", {"default": False, "tooltip":
+            "Leave the native sprite out of the sheet (it still sets the palette and cell size). For "
+            "animation cycles, where every frame is generated and the static reference is not one of them."})
         optional["front_view"] = ("IMAGE", {"tooltip":
             "Optional dedicated straight-front render. When order_offset is not 0 (the input was not a "
             "front view), it replaces output position 0, so the sheet always starts with a true front."})
@@ -118,7 +121,7 @@ class SpritePackBuildSheet:
 
     def build(self, native_sprite, render_scale, max_colors, columns, preview_scale, alpha_threshold,
               bg_tolerance, despeckle, clean_halo=True, order_offset=0, front_view=None,
-              facing_report=None, **frames):
+              facing_report=None, skip_native=False, **frames):
         native = core.binarize_alpha(_tensor_to_rgba(native_sprite), alpha_threshold)
         nh, nw = native.shape[:2]
         palette = core.build_palette(native, max_colors)
@@ -139,7 +142,7 @@ class SpritePackBuildSheet:
                 snapped = core.despeckle(snapped)
             return core.fit_canvas(snapped, nw, nh), detail
 
-        out, details = [front], []
+        out, details = ([] if skip_native else [front]), []
         for name in sorted(frames, key=lambda n: int(n.rsplit("_", 1)[-1])):
             img = frames[name]
             if img is None:
@@ -152,7 +155,7 @@ class SpritePackBuildSheet:
         flips = core.frames_to_flip(core.parse_facing_report(facing_report), int(order_offset), len(out))
         for j in flips:
             out[j] = out[j][:, ::-1].copy()
-        k = int(order_offset) % len(out)
+        k = 0 if skip_native else int(order_offset) % len(out)
         if k:  # out[j] sits at orbit position (k + j): rotate so position 0 comes first
             out = [out[(p - k) % len(out)] for p in range(len(out))]
             if front_view is not None:  # the input wasn't a front view: use the dedicated front render
@@ -330,12 +333,48 @@ class SpritePackGate:
         return (images[:0] if int(disabled) >= 1 else images,)
 
 
+class SpritePackPoseCycle:
+    """Draws one looping animation cycle (walk / run / idle) as OpenPose skeleton images, sized and
+    placed to match the character in `reference`, for an OpenPose-trained ControlNet. Procedural: no
+    pose-estimation model. Humanoid side views only; frame i is cycle phase i / frames."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "reference": ("IMAGE", {"tooltip":
+                "The character on a plain background (SpritePackPrepare's reference). Sets the canvas "
+                "size and where the skeleton stands."}),
+            "animation": (list(poses.ANIMATIONS),),
+            "frames": ("INT", {"default": 8, "min": 2, "max": 15, "tooltip": "Frames in the loop."}),
+            "facing": ("STRING", {"default": "right", "tooltip": "right or left (anything starting with l = left)."}),
+            "bg_threshold": ("INT", {"default": 24, "min": 1, "max": 255, "tooltip":
+                "Colour distance from the border colour that counts as character when measuring its size."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("poses", "frames", "info")
+    FUNCTION = "draw"
+    CATEGORY = "image/sprite sheet"
+
+    def draw(self, reference, animation, frames, facing, bg_threshold):
+        ref = (reference[0].detach().cpu().float().numpy() * 255.0).round().astype(np.uint8)
+        h, w = ref.shape[:2]
+        bbox = poses.figure_bbox(ref, bg_threshold)
+        facing = "left" if str(facing).strip().lower().startswith("l") else "right"
+        imgs = poses.render_cycle(animation, frames, (w, h), bbox, facing)
+        info = json.dumps({"animation": animation, "frames": len(imgs), "canvas": [w, h], "figure_bbox": list(bbox)})
+        print(f"[SpritePackPoseCycle] {info}")
+        batch = torch.from_numpy(np.stack(imgs).astype(np.float32) / 255.0)
+        return (batch, len(imgs), info)
+
+
 NODE_CLASS_MAPPINGS = {
     "SpritePackPrepare": SpritePackPrepare,
     "SpritePackBuildSheet": SpritePackBuildSheet,
     "SpritePackSaveGIF": SpritePackSaveGIF,
     "SpritePackSaveImage": SpritePackSaveImage,
     "SpritePackGate": SpritePackGate,
+    "SpritePackPoseCycle": SpritePackPoseCycle,
     "SpritePackStandardizeSheet": SpritePackStandardizeSheet,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -344,5 +383,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SpritePackSaveGIF": "Sprite Pack: Save Turntable GIF",
     "SpritePackSaveImage": "Sprite Pack: Save Image (switchable)",
     "SpritePackGate": "Sprite Pack: Gate (pass or empty)",
+    "SpritePackPoseCycle": "Sprite Pack: Pose Cycle (OpenPose skeletons)",
     "SpritePackStandardizeSheet": "Sprite Pack: Standardize Sheet",
 }
