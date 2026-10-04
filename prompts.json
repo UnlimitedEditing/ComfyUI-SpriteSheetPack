@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "_about": "Prompt book for SpritePackPromptBook. Edit freely: tags in the workflow slots (slot1 = actions, slot2 = views, slot3 = style) are looked up here. 'seconds' is how long an action runs in the video, 'settle' is how long to wait before the loop finder starts looking (the character is still moving into the action), 'kind' is 'cycle' (loops: walk, run, idle) or 'oneshot' (plays once: attack, jump...).",
+  "fps": 24,
+  "frame_rule": {
+    "base": 5,
+    "step": 17,
+    "max": 396,
+    "_note": "H3 lengths are base + step*k frames; ~396 is the practical max at 512x512"
+  },
+  "turn_seconds": 1.0,
+  "timeline_template": "[{start}s-{end}s] {text}",
+  "_timeline_template_note": "PLACEHOLDER: replace with the exact timestamp syntax H3 honours. Available fields: {start} {end} (seconds, one decimal) and {text}. Segments are joined with 'joiner'.",
+  "joiner": " ",
+  "preamble": "{subject} is the reference character. The scene is a plain pure white background, full body in frame from head to feet, static camera, flat even lighting, no shadows, no motion blur, no text. {style}",
+  "camera_first": "Camera: {view}.",
+  "camera_change": "The camera moves to {view}.",
+  "styles": {
+    "pixel-white": "Crisp pixel art style with hard pixel edges and a limited colour palette.",
+    "toon-white": "Clean 2D cartoon style with flat colours and bold outlines.",
+    "raw-white": ""
+  },
+  "views": {
+    "side": "a side view with the character facing right, at a fixed distance, camera level with the character",
+    "side-left": "a side view with the character facing left, at a fixed distance, camera level with the character",
+    "threequarter": "a three-quarter front view with the character facing right, at a fixed distance, camera level with the character",
+    "threequarter-left": "a three-quarter front view with the character facing left, at a fixed distance, camera level with the character",
+    "front": "a straight front view, at a fixed distance, camera level with the character",
+    "back": "a straight rear view, at a fixed distance, camera level with the character",
+    "topdown": "a high three-quarter top-down view looking down at the character, at a fixed distance"
+  },
+  "actions": {
+    "idle": {
+      "kind": "cycle",
+      "seconds": 2.5,
+      "settle": 0.3,
+      "text": "the character stands in place in a relaxed idle pose, breathing gently with tiny natural movement, looping seamlessly"
+    },
+    "walk": {
+      "kind": "cycle",
+      "seconds": 3.5,
+      "settle": 0.8,
+      "text": "the character walks in place at a steady pace with a smooth natural walk cycle, taking even steps without travelling across the frame"
+    },
+    "run": {
+      "kind": "cycle",
+      "seconds": 3.0,
+      "settle": 0.8,
+      "text": "the character runs in place with a smooth even run cycle, without travelling across the frame"
+    },
+    "jump": {
+      "kind": "oneshot",
+      "seconds": 2.0,
+      "settle": 0.0,
+      "text": "the character crouches, jumps straight up and lands back in the same spot"
+    },
+    "attack": {
+      "kind": "oneshot",
+      "seconds": 2.0,
+      "settle": 0.0,
+      "text": "the character performs one strong attack and returns to a ready stance"
+    },
+    "hit": {
+      "kind": "oneshot",
+      "seconds": 1.5,
+      "settle": 0.0,
+      "text": "the character flinches back from a hit and recovers"
+    },
+    "death": {
+      "kind": "oneshot",
+      "seconds": 2.5,
+      "settle": 0.0,
+      "text": "the character collapses to the ground and lies still"
+    }
+  }
+}

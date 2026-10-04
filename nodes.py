@@ -7,7 +7,7 @@ import json
 import numpy as np
 import torch
 
-from . import core, poses
+from . import core, poses, promptbook
 
 
 def _tensor_to_rgba(image, mask=None):
@@ -424,6 +424,103 @@ class SpritePackLoopFrames:
         return (picked, picked[:1], report["render_scale"], info, report["pixel_scale"])
 
 
+class SpritePackAnimationSheet:
+    """One video with several actions in a row -> one sprite sheet, one row per action.
+
+    Every action is cut out of the video by its segment (see core.animation_pick): cycles get the loop
+    finder, one-shots get evenly spaced frames. All frames share ONE pixel scale (figure height /
+    target_height), ONE palette and ONE ground line + pivot, so the actions line up in a game engine."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "frames": ("IMAGE",),
+            "segments": ("STRING", {"forceInput": True, "tooltip":
+                "JSON list of {label, start, end, kind, settle} in video frames (SpritePackPromptBook makes it)."}),
+            "count": ("INT", {"default": 8, "min": 2, "max": 15, "tooltip": "Frames per action."}),
+            "target_height": ("INT", {"default": 64, "min": 8, "max": 512, "tooltip":
+                "Sprite height in art pixels; sets the one pixel scale for every frame."}),
+            "max_colors": ("INT", {"default": 32, "min": 0, "max": 256, "tooltip": "Shared palette size."}),
+            "min_period": ("INT", {"default": 16, "min": 4, "max": 400}),
+            "max_period": ("INT", {"default": 64, "min": 8, "max": 800}),
+            "bg_tolerance": ("INT", {"default": 24, "min": 0, "max": 255}),
+            "alpha_threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
+            "clean_halo": ("BOOLEAN", {"default": True}),
+            "despeckle": ("BOOLEAN", {"default": False}),
+            "preview_scale": ("INT", {"default": 8, "min": 1, "max": 32}),
+            "fps": ("FLOAT", {"default": 8.0, "min": 1.0, "max": 60.0, "tooltip": "Playback rate written to the info JSON."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = ("sheet", "sheet_preview", "frames", "palette", "info")
+    FUNCTION = "build"
+    CATEGORY = "image/sprite sheet"
+
+    def build(self, frames, segments, count, target_height, max_colors, min_period, max_period, bg_tolerance,
+              alpha_threshold, clean_halo, despeckle, preview_scale, fps):
+        arr = (frames.detach().cpu().float().numpy() * 255.0).round().astype(np.uint8)
+        segs = json.loads(segments) if isinstance(segments, str) else segments
+        keyed, picks, scale = core.animation_pick(list(arr), segs, count=count, min_period=min_period,
+                                                  max_period=max_period, bg_tolerance=bg_tolerance,
+                                                  target_height=target_height)
+        order = [i for p in picks for i in p["indices"]]
+        native = [core.uniform_downscale(keyed[i], scale, alpha_threshold) for i in order]
+        palette = core.build_palette(np.concatenate(native, axis=0), max_colors)
+        native = [core.quantize_to_palette(f, palette) for f in native]
+        if clean_halo:
+            native = [core.clean_halo(f) for f in native]
+        if despeckle:
+            native = [core.despeckle(f) for f in native]
+        cells = core.align_on_feet(native)
+        sheet = core.build_sheet(cells, count)
+        ch, cw = cells[0].shape[:2]
+        states = [{"name": p["label"], "row": r, "start": r * int(count), "frames": int(count), "kind": p["kind"],
+                   "report": p["report"]} for r, p in enumerate(picks)]
+        info = json.dumps({"format": "spritepack.sheet", "version": 1, "cell": [cw, ch], "columns": int(count),
+                           "rows": len(picks), "fps": fps, "pixel_scale": round(scale, 3),
+                           "palette_size": len(palette), "states": states,
+                           "sheet": [sheet.shape[1], sheet.shape[0]]})
+        print(f"[SpritePackAnimationSheet] {info}")
+        frames_t = torch.from_numpy(np.stack(cells).astype(np.float32) / 255.0)
+        return (_rgba_to_tensor(sheet), _rgba_to_tensor(core.upscale_nearest(sheet, preview_scale)),
+                frames_t, _rgba_to_tensor(core.palette_swatches(palette)), info)
+
+
+class SpritePackPromptBook:
+    """Short semantic tags -> one H3 prompt with a timeline, the matching frame segments and the
+    snapped video length. Wording lives in prompts.json (edit it, no code change)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "actions": ("STRING", {"default": "walk", "tooltip":
+                "Actions in order, joined with +: idle walk run jump attack hit death (see prompts.json)."}),
+            "views": ("STRING", {"default": "side", "tooltip":
+                "One view for every action, or one per action joined with +: side side-left threequarter "
+                "threequarter-left front back topdown."}),
+            "style": ("STRING", {"default": "pixel-white", "tooltip": "pixel-white, toon-white or raw-white."}),
+            "subject": ("STRING", {"default": "<Picture 1>", "tooltip":
+                "How the prompt refers to the reference image."}),
+            "extra": ("STRING", {"default": "", "multiline": True, "tooltip":
+                "Optional short description of the character, appended to the subject."}),
+            "fps": ("INT", {"default": 24, "min": 8, "max": 60}),
+            "max_frames": ("INT", {"default": 396, "min": 22, "max": 800, "tooltip":
+                "Refuse sequences longer than this many video frames."}),
+        }}
+
+    RETURN_TYPES = ("STRING", "STRING", "INT", "STRING")
+    RETURN_NAMES = ("prompt", "segments", "length", "info")
+    FUNCTION = "plan"
+    CATEGORY = "image/sprite sheet"
+
+    def plan(self, actions, views, style, subject, extra, fps, max_frames):
+        plan = promptbook.build_plan(actions, views, style, subject, extra, fps=fps, max_frames=max_frames)
+        info = json.dumps(plan["info"])
+        print(f"[SpritePackPromptBook] {info}")
+        print(f"[SpritePackPromptBook] prompt: {plan['prompt']}")
+        return (plan["prompt"], json.dumps(plan["segments"]), plan["length"], info)
+
+
 NODE_CLASS_MAPPINGS = {
     "SpritePackPrepare": SpritePackPrepare,
     "SpritePackBuildSheet": SpritePackBuildSheet,
@@ -432,6 +529,8 @@ NODE_CLASS_MAPPINGS = {
     "SpritePackGate": SpritePackGate,
     "SpritePackPoseCycle": SpritePackPoseCycle,
     "SpritePackLoopFrames": SpritePackLoopFrames,
+    "SpritePackAnimationSheet": SpritePackAnimationSheet,
+    "SpritePackPromptBook": SpritePackPromptBook,
     "SpritePackStandardizeSheet": SpritePackStandardizeSheet,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -442,5 +541,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SpritePackGate": "Sprite Pack: Gate (pass or empty)",
     "SpritePackPoseCycle": "Sprite Pack: Pose Cycle (OpenPose skeletons)",
     "SpritePackLoopFrames": "Sprite Pack: Loop Frames (walk cycle from video)",
+    "SpritePackAnimationSheet": "Sprite Pack: Animation Sheet (actions from one video)",
+    "SpritePackPromptBook": "Sprite Pack: Prompt Book (tags -> prompt + timeline)",
     "SpritePackStandardizeSheet": "Sprite Pack: Standardize Sheet",
 }

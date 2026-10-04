@@ -474,19 +474,17 @@ def fit_canvas(rgba, width, height):
     return out
 
 
-def _loop_thumb(rgba, bg_tolerance, win_h, win_w, size=40):
-    """Foreground of one video frame as a small fixed-window RGB thumbnail aligned on the figure
-    (x = mask centroid, y = bottom of the figure), background zero. For comparing walk poses."""
-    keyed = remove_border_background(rgba, bg_tolerance)
-    mask = keyed[..., 3] > 0
-    ys, xs = np.nonzero(mask)
+def _loop_thumb(keyed, win_h, win_w, size=40):
+    """Foreground of one keyed video frame (RGBA, background transparent) as a small fixed-window RGB
+    thumbnail aligned on the figure (x = mask centroid, y = bottom of the figure), background zero."""
+    ys, xs = np.nonzero(keyed[..., 3] > 0)
     if len(xs) == 0:
         return np.zeros(size * size * 3, np.float32), (0, 0)
     cx, bottom = int(round(xs.mean())), int(ys.max()) + 1
     x0, y0 = cx - win_w // 2, bottom - win_h
     canvas = np.zeros((win_h, win_w, 3), np.uint8)
     sx0, sy0 = max(0, x0), max(0, y0)
-    sx1, sy1 = min(rgba.shape[1], x0 + win_w), min(rgba.shape[0], bottom)
+    sx1, sy1 = min(keyed.shape[1], x0 + win_w), min(keyed.shape[0], bottom)
     sub = keyed[sy0:sy1, sx0:sx1]
     region = sub[..., :3] * (sub[..., 3:4] > 0)
     canvas[sy0 - y0:sy0 - y0 + region.shape[0], sx0 - x0:sx0 - x0 + region.shape[1]] = region
@@ -494,28 +492,17 @@ def _loop_thumb(rgba, bg_tolerance, win_h, win_w, size=40):
     return thumb.reshape(-1), (int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
 
 
-def find_loop(frames, count=8, min_period=16, max_period=64, window=4, period=0, bg_tolerance=24,
-              target_height=64, skip=3):
-    """One seamless walk cycle in a video (list of RGB/RGBA uint8 frames, the character on a plain
-    background) -> (frame indices, report dict).
-
-    Walking in place repeats every full stride, but the *silhouette* repeats every step (left and
-    right legs swap), so frames are compared in colour, and matched as a `window`-frame run: one
-    pose occurs twice per stride (swinging forward and back), so a single-frame match finds loops
-    that jump backwards at the seam. Period = the smallest local error minimum within 25% of the
-    best. The loop starts at the best seam, then rotates to the widest stride so the sheet opens on
-    a contact pose. `count` indices are spread evenly over the cycle."""
-    rgbas = [to_rgba(f) for f in frames]
+def _find_loop_keyed(keyed, count, min_period, max_period, window, period, target_height, skip):
+    """find_loop on frames that are already keyed (RGBA, background transparent)."""
     boxes = []
-    for r in rgbas:
-        keyed = remove_border_background(r, bg_tolerance)
-        ys, xs = np.nonzero(keyed[..., 3] > 0)
+    for k in keyed:
+        ys, xs = np.nonzero(k[..., 3] > 0)
         boxes.append((int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)) if len(xs) else (0, 0))
     bw = np.array([b[0] for b in boxes])
     bh = np.array([b[1] for b in boxes])
     win_h = max(8, int(np.median(bh) * 1.1))
     win_w = max(8, int(np.percentile(bw, 90) * 1.15))
-    thumbs, spans = zip(*[_loop_thumb(r, bg_tolerance, win_h, win_w) for r in rgbas])
+    thumbs, spans = zip(*[_loop_thumb(k, win_h, win_w) for k in keyed])
     v = np.stack(thumbs)
     t_total = len(v)
     window = max(1, min(window, t_total // 4))
@@ -550,34 +537,104 @@ def find_loop(frames, count=8, min_period=16, max_period=64, window=4, period=0,
     scale = max(1, int(round(height / max(1, target_height))))
     pixel_scale = max(1.0, height / float(max(1, target_height)))
     report = {"frames_in": t_total, "period": p, "start": s, "widest": widest, "indices": idx,
-              "seam_error": round(float(min(seam)), 4),
+              "seam_error": round(float(min(seam)), 4), "weak": bool(float(min(seam)) > 0.05),
               "best_period_error": round(min(errs.values()), 4) if errs else None,
               "figure_px": [int(np.median(bw)), int(height)], "render_scale": scale,
               "pixel_scale": round(pixel_scale, 3)}
     return idx, report
 
 
-def uniform_snap(rgba, scale, palette, alpha_threshold=0.5):
+def find_loop(frames, count=8, min_period=16, max_period=64, window=4, period=0, bg_tolerance=24,
+              target_height=64, skip=3):
+    """One seamless walk cycle in a video (list of RGB/RGBA uint8 frames, the character on a plain
+    background) -> (frame indices, report dict).
+
+    Walking in place repeats every full stride, but the *silhouette* repeats every step (left and
+    right legs swap), so frames are compared in colour, and matched as a `window`-frame run: one
+    pose occurs twice per stride (swinging forward and back), so a single-frame match finds loops
+    that jump backwards at the seam. Period = the smallest local error minimum within 25% of the
+    best. The loop starts at the best seam, then rotates to the widest stride so the sheet opens on
+    a contact pose. `count` indices are spread evenly over the cycle."""
+    keyed = [remove_border_background(to_rgba(f), bg_tolerance) for f in frames]
+    return _find_loop_keyed(keyed, count, min_period, max_period, window, period, target_height, skip)
+
+
+def animation_pick(frames, segments, count=8, min_period=16, max_period=64, bg_tolerance=24, target_height=64):
+    """One long video holding several actions in a row -> `count` frame indices per segment.
+
+    `segments` = [{"label", "start", "end", "kind": "cycle"|"oneshot", "settle"}, ...] in video frames
+    (the prompt author knows them: it wrote the timeline). The first `settle` frames of a segment are
+    skipped (the character is still turning or changing camera). A "cycle" gets the loop finder
+    (a segment too short for one falls back to even spacing and says so); a "oneshot" (attack, jump,
+    hit...) gets evenly spaced frames across its active window.
+    Returns (keyed frames, [{label, kind, indices, report}], pixel_scale): one scale for every frame."""
+    keyed = [remove_border_background(to_rgba(f), bg_tolerance) for f in frames]
+    n = len(keyed)
+    picks = []
+    for seg in segments:
+        lo = max(0, int(seg.get("start", 0)) + int(seg.get("settle", 0)))
+        hi = min(n, int(seg.get("end", n)))
+        if hi - lo < 2:
+            raise ValueError(f"segment {seg.get('label')!r}: frames {lo}-{hi} leave nothing to pick "
+                             f"(video has {n} frames)")
+        kind = seg.get("kind", "cycle")
+        report = {"range": [lo, hi]}
+        idx = None
+        if kind == "cycle":
+            try:
+                local, rep = _find_loop_keyed(keyed[lo:hi], count, min_period, max_period, 4, 0,
+                                              target_height, 2)
+                idx = [lo + i for i in local]
+                report.update(period=rep["period"], seam_error=rep["seam_error"], weak=rep["weak"], start=lo + rep["start"])
+            except ValueError as e:
+                report["fallback"] = str(e)
+        if idx is None:  # oneshot, or a cycle that could not be found
+            idx = [int(round(lo + i * (hi - 1 - lo) / float(max(1, count - 1)))) for i in range(int(count))]
+            report["kind_used"] = "even"
+        picks.append({"label": seg.get("label", f"action{len(picks) + 1}"), "kind": kind,
+                      "indices": idx, "report": report})
+    heights = []
+    for p in picks:
+        for i in p["indices"]:
+            ys, xs = np.nonzero(keyed[i][..., 3] > 0)
+            if len(ys):
+                heights.append(int(ys.max() - ys.min() + 1))
+    height = float(np.median(heights)) if heights else float(target_height)
+    return keyed, picks, max(1.0, height / float(max(1, target_height)))
+
+
+def uniform_downscale(rgba, scale, alpha_threshold=0.5):
     """Video frame (RGBA, background already keyed) -> native-pixel RGBA at ONE fixed scale: the whole
-    canvas is area-averaged down by `scale` (premultiplied, so edges stay clean), alpha is cut at
-    `alpha_threshold`, and colours snap to the nearest palette entry. Unlike snap_tracked this never
-    fits a grid to the individual frame, so every frame of a cycle has the same size and proportions
-    (tracked snapping rescales each frame's axes on its own, which stretches and squashes a walk)."""
+    canvas is area-averaged down by `scale` (premultiplied, so edges stay clean) and alpha is cut at
+    `alpha_threshold`. Colours are NOT snapped yet (see quantize_to_palette)."""
     h, w = rgba.shape[:2]
     nw, nh = max(1, int(round(w / float(scale)))), max(1, int(round(h / float(scale))))
     a = rgba[..., 3:4].astype(np.float32) / 255.0
     pm = np.concatenate([rgba[..., :3].astype(np.float32) * a, a * 255.0], axis=-1)
-    chans = [np.asarray(Image.fromarray(pm[..., c], mode="F").resize((nw, nh), Image.BOX), np.float32)
-             for c in range(4)]
+    chans = [np.asarray(Image.fromarray(pm[..., k], mode="F").resize((nw, nh), Image.BOX), np.float32)
+             for k in range(4)]
     alpha = chans[3] / 255.0
     rgb = np.stack(chans[:3], axis=-1) / np.maximum(alpha[..., None], 1e-6)
     out = np.zeros((nh, nw, 4), np.uint8)
     out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
     out[..., 3] = np.where(alpha >= alpha_threshold, 255, 0).astype(np.uint8)
+    return out
+
+
+def quantize_to_palette(rgba, palette):
+    """Snap every opaque pixel to the nearest palette colour (transparent pixels stay transparent)."""
+    out = rgba.copy()
     idx = palette_indices(out, palette)
     out[idx < 0, 3] = 0
     out[idx >= 0, :3] = palette[idx[idx >= 0]]
     return out
+
+
+def uniform_snap(rgba, scale, palette, alpha_threshold=0.5):
+    """uniform_downscale + quantize_to_palette. Unlike snap_tracked this never fits a grid to the
+    individual frame, so every frame of a cycle has the same size and proportions (tracked snapping
+    rescales each frame's axes on its own, which stretches and squashes a walk)."""
+    return quantize_to_palette(uniform_downscale(rgba, scale, alpha_threshold), palette)
 
 
 def align_on_feet(frames, pad=1):

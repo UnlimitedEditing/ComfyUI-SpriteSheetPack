@@ -236,3 +236,115 @@ def test_uniform_scale_keeps_every_frame_the_same_size():
     cells = [d["cells"] for d in _json.loads(binfo)["details"]]
     assert len({tuple(c) for c in cells}) == 1                 # identical grid for every frame, no per-frame refit
     assert all(abs(d["period"] - pscale) < 1e-3 for d in _json.loads(binfo)["details"])
+
+
+def _multi_action_video():
+    a = _walker_frames(total=108, period=36)
+    b = _walker_frames(total=84, period=28)
+    c = _walker_frames(total=48, period=44)
+    segs = [{"label": "walk", "start": 0, "end": 108, "kind": "cycle", "settle": 6},
+            {"label": "run", "start": 108, "end": 192, "kind": "cycle", "settle": 4},
+            {"label": "attack", "start": 192, "end": 240, "kind": "oneshot", "settle": 4}]
+    return a + b + c, segs
+
+
+def test_animation_pick_cuts_each_action_from_its_own_segment():
+    frames, segs = _multi_action_video()
+    keyed, picks, scale = core.animation_pick(frames, segs, count=6, min_period=14, max_period=60, target_height=40)
+    assert [p["label"] for p in picks] == ["walk", "run", "attack"]
+    for p, s in zip(picks, segs):
+        assert len(p["indices"]) == 6
+        assert all(s["start"] + s["settle"] <= i < s["end"] for i in p["indices"]), p
+    assert abs(picks[0]["report"]["period"] - 36) <= 2 and abs(picks[1]["report"]["period"] - 28) <= 2, picks
+    one = picks[2]["indices"]
+    assert one == sorted(one) and len(set(one)) == 6          # one-shot: even spacing, no loop search
+    assert scale > 1.0
+
+
+def test_animation_pick_too_short_for_a_cycle_falls_back_instead_of_crashing():
+    frames = _walker_frames(total=14, period=36)
+    segs = [{"label": "walk", "start": 0, "end": 14, "kind": "cycle", "settle": 2}]
+    _, picks, _ = core.animation_pick(frames, segs, count=5, min_period=16, max_period=64)
+    assert "fallback" in picks[0]["report"] and len(picks[0]["indices"]) == 5
+
+
+def test_animation_sheet_node_one_row_per_action_one_scale_one_pivot():
+    import json as _json
+    frames, segs = _multi_action_video()
+    t = torch.from_numpy(np.stack(frames).astype(np.float32) / 255.0)
+    node = pkg.NODE_CLASS_MAPPINGS["SpritePackAnimationSheet"]()
+    sheet, prev, fr, pal, info = node.build(t, _json.dumps(segs), 6, 40, 24, 14, 60, 24, 0.5, True, False, 4, 8.0)
+    meta = _json.loads(info)
+    assert meta["rows"] == 3 and meta["columns"] == 6 and [s["name"] for s in meta["states"]] == ["walk", "run", "attack"]
+    cw, ch = meta["cell"]
+    assert tuple(sheet.shape) == (1, 3 * ch, 6 * cw, 4) and fr.shape[0] == 18
+    bottoms = {int(np.nonzero(f[..., 3].any(1))[0].max()) for f in fr.numpy()}
+    assert len(bottoms) == 1                                    # shared ground line across all actions
+    hs = [int(np.ptp(np.nonzero(f[..., 3].any(1))[0])) for f in fr.numpy()]
+    assert max(hs) - min(hs) <= 4                               # one pixel scale: no per-frame stretching
+    assert not (pal.numpy()[0][..., :3] > 0.99).all(axis=-1).any()
+
+
+def test_animation_pick_reports_loop_quality():
+    frames, segs = _multi_action_video()
+    _, picks, _ = core.animation_pick(frames, segs, count=6, min_period=14, max_period=60)
+    for p in picks[:2]:
+        assert p["report"]["weak"] is False and p["report"]["seam_error"] < 0.05
+
+
+def test_promptbook_plan_segments_length_and_prompt():
+    import promptbook
+    plan = promptbook.build_plan("walk+run+attack", "side", "pixel-white", extra="green orc with tusks")
+    segs, length = plan["segments"], plan["length"]
+    assert [s["label"] for s in segs] == ["walk", "run", "attack"] and [s["kind"] for s in segs] == ["cycle", "cycle", "oneshot"]
+    assert (length - 5) % 17 == 0 and length <= 396            # a length H3 accepts
+    assert segs[0]["start"] == 0 and segs[-1]["end"] == length
+    assert all(a["end"] == b["start"] for a, b in zip(segs, segs[1:]))   # contiguous
+    assert segs[0]["settle"] > segs[1]["settle"] - 1            # first action also waits out the camera/turn
+    p = plan["prompt"]
+    assert "green orc with tusks" in p and "<Picture 1>" in p and "walks in place" in p and "runs in place" in p
+    assert p.count("[") == 3 and "pixel art" in p
+
+
+def test_promptbook_views_pair_with_actions_and_camera_change_adds_settle():
+    import promptbook
+    plan = promptbook.build_plan("walk+walk+idle", "side+front", "raw-white")
+    views = [s["view"] for s in plan["segments"]]
+    assert views == ["side", "front", "front"]                  # shorter view list repeats its last entry
+    s0, s1, s2 = plan["segments"]
+    assert s1["settle"] > s2["settle"]                          # a camera move costs settle time, staying on `front` does not
+    assert "The camera moves to a straight front view" in plan["prompt"]
+
+
+def test_promptbook_errors_are_readable():
+    import promptbook
+    for args, word in ((("fly", "side", "pixel-white"), "action"), (("walk", "sideways", "pixel-white"), "view"),
+                       (("walk", "side", "oil-paint"), "style")):
+        try:
+            promptbook.build_plan(*args)
+        except ValueError as e:
+            assert word in str(e) and "valid" in str(e)
+        else:
+            raise AssertionError(f"expected ValueError for {args}")
+    try:
+        promptbook.build_plan("walk+walk+walk+walk+walk+walk", "side", "pixel-white")
+    except ValueError as e:
+        assert "limit" in str(e)
+    else:
+        raise AssertionError("expected the frame limit to trip")
+
+
+def test_promptbook_node_feeds_animation_sheet_segments():
+    import json as _json
+    plan = pkg.NODE_CLASS_MAPPINGS["SpritePackPromptBook"]().plan("walk+run", "side", "pixel-white", "<Picture 1>", "", 24, 396)
+    prompt, segments, length, info = plan
+    segs = _json.loads(segments)
+    assert length >= segs[-1]["start"] and all({"label", "start", "end", "kind", "settle"} <= set(s) for s in segs)
+
+
+def test_promptbook_labels_are_unique():
+    import promptbook
+    f = lambda a, v: [s["label"] for s in promptbook.build_plan(a, v, "raw-white")["segments"]]
+    assert f("walk+walk", "side+front") == ["walk_side", "walk_front"]
+    assert f("walk+walk", "side") == ["walk1", "walk2"]
+    assert f("walk+run", "side") == ["walk", "run"]
