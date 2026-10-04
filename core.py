@@ -492,7 +492,31 @@ def _loop_thumb(keyed, win_h, win_w, size=40):
     return thumb.reshape(-1), (int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
 
 
-def _find_loop_keyed(keyed, count, min_period, max_period, window, period, target_height, skip):
+def _motion_uniform(v, cyc, count):
+    """`count` frames of one cycle at equal steps of pose CHANGE rather than of time.
+
+    A generated walk does not move at constant speed (holds, then fast steps), so equal time steps give
+    a sprite that hesitates and then jumps. The cycle is walked frame to frame (closing back to its
+    first frame), the pose change is accumulated, and the frames nearest to equal fractions of the
+    total are picked. Returns None when nothing moves (caller keeps equal time steps)."""
+    p = len(cyc)
+    step = np.array([np.abs(v[cyc[j]] - v[cyc[(j + 1) % p]]).mean() for j in range(p)])
+    total = float(step.sum())
+    if total < 1e-6 or count >= p:
+        return None
+    pos = np.concatenate([[0.0], np.cumsum(step[:-1])])
+    picks, used = [], set()
+    for k in range(count):
+        j = int(np.argmin(np.abs(pos - k * total / count)))
+        while j in used and j + 1 < p:     # two targets landing on one frame: take the next one
+            j += 1
+        used.add(j)
+        picks.append(j)
+    return [cyc[j] for j in sorted(picks)]
+
+
+def _find_loop_keyed(keyed, count, min_period, max_period, window, period, target_height, skip,
+                     spacing="motion"):
     """find_loop on frames that are already keyed (RGBA, background transparent)."""
     boxes = []
     for k in keyed:
@@ -532,11 +556,14 @@ def _find_loop_keyed(keyed, count, min_period, max_period, window, period, targe
     s = skip + int(np.argmin(seam))
     # rotate to the widest stride so frame 0 is a contact pose
     widest = s + int(np.argmax([spans[s + j][0] for j in range(p)]))
-    idx = [s + ((widest - s + int(round(i * p / float(count)))) % p) for i in range(int(count))]
+    cyc = [s + ((widest - s + j) % p) for j in range(p)]           # one cycle in order, opening on the widest stride
+    idx = [cyc[int(round(i * p / float(count))) % p] for i in range(int(count))]            # equal TIME steps
+    if spacing == "motion":
+        idx = _motion_uniform(v, cyc, int(count)) or idx
     height = float(np.median(bh[bh > 0])) if (bh > 0).any() else float(target_height)
     scale = max(1, int(round(height / max(1, target_height))))
     pixel_scale = max(1.0, height / float(max(1, target_height)))
-    report = {"frames_in": t_total, "period": p, "start": s, "widest": widest, "indices": idx,
+    report = {"frames_in": t_total, "period": p, "start": s, "widest": widest, "indices": idx, "spacing": spacing,
               "seam_error": round(float(min(seam)), 4), "weak": bool(float(min(seam)) > 0.05),
               "best_period_error": round(min(errs.values()), 4) if errs else None,
               "figure_px": [int(np.median(bw)), int(height)], "render_scale": scale,
@@ -545,7 +572,7 @@ def _find_loop_keyed(keyed, count, min_period, max_period, window, period, targe
 
 
 def find_loop(frames, count=8, min_period=16, max_period=64, window=4, period=0, bg_tolerance=24,
-              target_height=64, skip=3):
+              target_height=64, skip=3, spacing="motion"):
     """One seamless walk cycle in a video (list of RGB/RGBA uint8 frames, the character on a plain
     background) -> (frame indices, report dict).
 
@@ -556,10 +583,11 @@ def find_loop(frames, count=8, min_period=16, max_period=64, window=4, period=0,
     best. The loop starts at the best seam, then rotates to the widest stride so the sheet opens on
     a contact pose. `count` indices are spread evenly over the cycle."""
     keyed = [remove_border_background(to_rgba(f), bg_tolerance) for f in frames]
-    return _find_loop_keyed(keyed, count, min_period, max_period, window, period, target_height, skip)
+    return _find_loop_keyed(keyed, count, min_period, max_period, window, period, target_height, skip, spacing)
 
 
-def animation_pick(frames, segments, count=8, min_period=16, max_period=64, bg_tolerance=24, target_height=64):
+def animation_pick(frames, segments, count=8, min_period=16, max_period=64, bg_tolerance=24, target_height=64,
+                   spacing="motion", settle_cap=8):
     """One long video holding several actions in a row -> `count` frame indices per segment.
 
     `segments` = [{"label", "start", "end", "kind": "cycle"|"oneshot", "settle"}, ...] in video frames
@@ -572,18 +600,25 @@ def animation_pick(frames, segments, count=8, min_period=16, max_period=64, bg_t
     n = len(keyed)
     picks = []
     for seg in segments:
-        lo = max(0, int(seg.get("start", 0)) + int(seg.get("settle", 0)))
+        kind = seg.get("kind", "cycle")
+        settle = int(seg.get("settle", 0))
+        if kind == "cycle":
+            # A cycle search must see (nearly) the whole segment: the seam search already steps over a
+            # turn or a camera cut by itself, but starving it of frames makes it settle on a wrong,
+            # shorter period (live run: 47 of 90 frames left -> period 18 instead of 24, an 8-frame
+            # sheet covering 3/4 of a stride). `settle` only matters for one-shots.
+            settle = min(settle, int(settle_cap))
+        lo = max(0, int(seg.get("start", 0)) + settle)
         hi = min(n, int(seg.get("end", n)))
         if hi - lo < 2:
             raise ValueError(f"segment {seg.get('label')!r}: frames {lo}-{hi} leave nothing to pick "
                              f"(video has {n} frames)")
-        kind = seg.get("kind", "cycle")
         report = {"range": [lo, hi]}
         idx = None
         if kind == "cycle":
             try:
                 local, rep = _find_loop_keyed(keyed[lo:hi], count, min_period, max_period, 4, 0,
-                                              target_height, 2)
+                                              target_height, 2, spacing)
                 idx = [lo + i for i in local]
                 report.update(period=rep["period"], seam_error=rep["seam_error"], weak=rep["weak"], start=lo + rep["start"])
             except ValueError as e:

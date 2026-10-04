@@ -359,3 +359,75 @@ def test_promptbook_uses_the_verified_h3_timestamp_syntax():
     assert "[Shot 3] At 00:06.500, the shot cuts to a straight front view" in p
     assert "[Shot 1] Clean 2D game-asset animation" in p and "<Picture 1> is the reference character" in p
     assert p.rstrip().endswith("non_diegetic_music: None. No music.") and "overall_soundscape: Silent." in p
+
+
+def _uneven_walker_frames(total=120, period=36, wobble=0.16, size=(176, 208)):
+    """A walker whose speed varies through the stride (phase = t/period + wobble*sin(2 pi t/period)): holds,
+    then fast steps -- like a generated video, unlike the constant-speed _walker_frames."""
+    import math
+    from PIL import Image, ImageDraw
+    out = []
+    for t in range(total):
+        ph = t / period + wobble * math.sin(2 * math.pi * t / period)
+        im = Image.new("RGB", size, (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        cx, hip_y = 80, 110
+        d.rectangle([cx - 14, 50, cx + 14, hip_y], fill=(90, 120, 90))
+        d.ellipse([cx - 12, 22, cx + 12, 50], fill=(210, 170, 130))
+        for off, color in ((0.0, (200, 40, 40)), (0.5, (40, 60, 200))):
+            ang = 0.55 * math.sin(2 * math.pi * (ph + off))
+            d.line([cx, hip_y, cx + 70 * math.sin(ang), hip_y + 70 * math.cos(ang)], fill=color, width=9)
+        out.append(np.asarray(im))
+    return out
+
+
+def test_motion_spacing_gives_more_even_pose_steps_than_time_spacing():
+    frames = _uneven_walker_frames()
+    fg = [(f.astype(np.int32).sum(-1) < 740) for f in frames]
+
+    def step(a, b):
+        m = fg[a] | fg[b]
+        d = np.abs(frames[a].astype(np.int32) - frames[b].astype(np.int32)).sum(-1) > 60
+        return (d & m).sum() / max(1, m.sum())
+
+    def evenness(spacing):
+        idx, rep = core.find_loop(frames, count=8, min_period=16, max_period=60, spacing=spacing)
+        s = [step(idx[i], idx[(i + 1) % 8]) for i in range(8)]
+        return float(np.std(s) / np.mean(s)), idx, rep
+
+    t_even, t_idx, _ = evenness("time")
+    m_even, m_idx, m_rep = evenness("motion")
+    assert m_rep["spacing"] == "motion" and len(set(m_idx)) == 8
+    assert m_even < t_even * 0.8, (t_even, m_even)              # clearly more even than equal time steps
+    assert m_idx[0] == t_idx[0]                                  # both still open on the widest stride
+
+
+def test_spacing_option_reaches_the_nodes():
+    frames = _uneven_walker_frames()
+    t = torch.from_numpy(np.stack(frames).astype(np.float32) / 255.0)
+    pick = pkg.NODE_CLASS_MAPPINGS["SpritePackLoopFrames"]().pick
+    a = pick(t, 8, 16, 60, 0, 40, 24, "time")[3]
+    b = pick(t, 8, 16, 60, 0, 40, 24, "motion")[3]
+    import json as _json
+    assert _json.loads(a)["spacing"] == "time" and _json.loads(b)["spacing"] == "motion"
+    assert _json.loads(a)["indices"] != _json.loads(b)["indices"]
+
+
+def test_cycle_settle_does_not_starve_the_period_search():
+    """Regression (live run): a long 'settle' left 47 of 90 frames, and the finder chose period 18 for a 24-frame
+    stride. The first 30 frames here are a different motion (like a turn); settle=43 must not change the answer."""
+    stand = _walker_frames(total=30, period=1000)               # legs almost still: a transient
+    walk = _walker_frames(total=60, period=24)
+    frames = stand + walk
+    segs = [{"label": "walk", "start": 0, "end": 90, "kind": "cycle", "settle": 43}]
+    _, picks, _ = core.animation_pick(frames, segs, count=8, min_period=16, max_period=64)
+    rep = picks[0]["report"]
+    assert abs(rep["period"] - 24) <= 1, rep
+    assert rep["range"][0] <= 8                                  # the search was not cut down to frames 43+
+    assert not rep["weak"]
+
+
+def test_spacing_is_optional_so_older_restored_workflows_still_validate():
+    for name in ("SpritePackLoopFrames", "SpritePackAnimationSheet"):
+        it = pkg.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()
+        assert "spacing" in it.get("optional", {}) and "spacing" not in it["required"], name

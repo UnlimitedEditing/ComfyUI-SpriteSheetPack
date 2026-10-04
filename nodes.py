@@ -406,6 +406,9 @@ class SpritePackLoopFrames:
             "target_height": ("INT", {"default": 64, "min": 8, "max": 512, "tooltip":
                 "Wanted sprite height in art pixels; sets the suggested render_scale."}),
             "bg_tolerance": ("INT", {"default": 24, "min": 0, "max": 255}),
+        }, "optional": {
+            "spacing": (["motion", "time"], {"default": "motion", "tooltip":
+                "motion: equal steps of pose change (no hold-then-jump). time: equal steps of video time."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "STRING", "FLOAT")
@@ -413,11 +416,12 @@ class SpritePackLoopFrames:
     FUNCTION = "pick"
     CATEGORY = "image/sprite sheet"
 
-    def pick(self, frames, count, min_period, max_period, period_override, target_height, bg_tolerance):
+    def pick(self, frames, count, min_period, max_period, period_override, target_height, bg_tolerance,
+             spacing="motion"):
         arr = (frames.detach().cpu().float().numpy() * 255.0).round().astype(np.uint8)
         idx, report = core.find_loop(list(arr), count=count, min_period=min_period, max_period=max_period,
                                      period=period_override, bg_tolerance=bg_tolerance,
-                                     target_height=target_height)
+                                     target_height=target_height, spacing=spacing)
         info = json.dumps(report)
         print(f"[SpritePackLoopFrames] {info}")
         picked = frames[idx]
@@ -449,6 +453,10 @@ class SpritePackAnimationSheet:
             "despeckle": ("BOOLEAN", {"default": False}),
             "preview_scale": ("INT", {"default": 8, "min": 1, "max": 32}),
             "fps": ("FLOAT", {"default": 8.0, "min": 1.0, "max": 60.0, "tooltip": "Playback rate written to the info JSON."}),
+        }, "optional": {
+            "spacing": (["motion", "time"], {"default": "motion", "tooltip":
+                "Cycles: motion = equal steps of pose change (no hold-then-jump), time = equal steps of video time. "
+                "Optional so workflows restored before this existed keep working."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING")
@@ -457,12 +465,12 @@ class SpritePackAnimationSheet:
     CATEGORY = "image/sprite sheet"
 
     def build(self, frames, segments, count, target_height, max_colors, min_period, max_period, bg_tolerance,
-              alpha_threshold, clean_halo, despeckle, preview_scale, fps):
+              alpha_threshold, clean_halo, despeckle, preview_scale, fps, spacing="motion"):
         arr = (frames.detach().cpu().float().numpy() * 255.0).round().astype(np.uint8)
         segs = json.loads(segments) if isinstance(segments, str) else segments
         keyed, picks, scale = core.animation_pick(list(arr), segs, count=count, min_period=min_period,
                                                   max_period=max_period, bg_tolerance=bg_tolerance,
-                                                  target_height=target_height)
+                                                  target_height=target_height, spacing=spacing)
         order = [i for p in picks for i in p["indices"]]
         native = [core.uniform_downscale(keyed[i], scale, alpha_threshold) for i in order]
         palette = core.build_palette(np.concatenate(native, axis=0), max_colors)
