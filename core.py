@@ -541,8 +541,16 @@ def _find_loop_keyed(keyed, count, min_period, max_period, window, period, targe
                              f"needs more than {lo + window + skip + 1})")
         for q in range(lo, hi + 1):
             n_t = t_total - q - window + 1
+            # A long period leaves few frame pairs to compare, and the error over a handful of pairs is
+            # spuriously low (live run: a 24-frame stride came out as 62 because only 11 pairs overlapped).
+            # Only trust a period with enough overlap to be evidence.
+            if n_t < max(10, int(0.6 * q)):
+                continue
             e = np.mean([np.abs(v[k:k + n_t] - v[q + k:q + k + n_t]).mean() for k in range(window)])
             errs[q] = float(e)
+        if not errs:
+            raise ValueError(f"video too short for a loop: {t_total} frames leave too few frame pairs to compare "
+                             f"for periods {lo}-{hi}")
         best = min(errs.values())
         cands = [q for q in errs if errs[q] <= best * 1.25 + 1e-9
                  and errs[q] <= errs.get(q - 1, 9e9) and errs[q] <= errs.get(q + 1, 9e9)]
@@ -586,6 +594,34 @@ def find_loop(frames, count=8, min_period=16, max_period=64, window=4, period=0,
     return _find_loop_keyed(keyed, count, min_period, max_period, window, period, target_height, skip, spacing)
 
 
+def _motion_pick(keyed, count):
+    """`count` frames (local indices, first and last included) at equal steps of pose CHANGE across a
+    one-shot segment. A hold (the character standing still before or after the action) has no pose
+    change, so it earns no frames: equal time steps would fill a sheet row with near-identical copies
+    of the pose the video ended on. Returns None when nothing moves."""
+    boxes = []
+    for k in keyed:
+        ys, xs = np.nonzero(k[..., 3] > 0)
+        boxes.append((int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)) if len(xs) else (0, 0))
+    bw = np.array([b[0] for b in boxes])
+    bh = np.array([b[1] for b in boxes])
+    win_h = max(8, int(np.median(bh) * 1.1))
+    win_w = max(8, int(np.percentile(bw, 90) * 1.15))
+    v = np.stack([_loop_thumb(k, win_h, win_w)[0] for k in keyed])
+    step = np.abs(np.diff(v, axis=0)).mean(axis=1)
+    total = float(step.sum())
+    if total < 1e-6 or count >= len(keyed):
+        return None
+    pos = np.concatenate([[0.0], np.cumsum(step)])
+    picks = []
+    for k in range(count):
+        j = int(np.argmin(np.abs(pos - k * total / max(1, count - 1))))
+        while picks and j <= picks[-1] and j + 1 < len(keyed):   # keep strictly increasing
+            j += 1
+        picks.append(j)
+    return picks
+
+
 def animation_pick(frames, segments, count=8, min_period=16, max_period=64, bg_tolerance=24, target_height=64,
                    spacing="motion", settle_cap=8):
     """One long video holding several actions in a row -> `count` frame indices per segment.
@@ -623,7 +659,12 @@ def animation_pick(frames, segments, count=8, min_period=16, max_period=64, bg_t
                 report.update(period=rep["period"], seam_error=rep["seam_error"], weak=rep["weak"], start=lo + rep["start"])
             except ValueError as e:
                 report["fallback"] = str(e)
-        if idx is None:  # oneshot, or a cycle that could not be found
+        if idx is None and spacing == "motion":      # oneshot, or a cycle that could not be found
+            local = _motion_pick(keyed[lo:hi], int(count))
+            if local:
+                idx = [lo + i for i in local]
+                report["kind_used"] = "motion"
+        if idx is None:
             idx = [int(round(lo + i * (hi - 1 - lo) / float(max(1, count - 1)))) for i in range(int(count))]
             report["kind_used"] = "even"
         picks.append({"label": seg.get("label", f"action{len(picks) + 1}"), "kind": kind,

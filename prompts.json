@@ -55,25 +55,25 @@
       "kind": "oneshot",
       "seconds": 2.0,
       "settle": 0.0,
-      "text": "the character crouches, jumps straight up and lands back in the same spot"
+      "text": "the character stays in the same side view and keeps facing the same way, crouches, jumps straight up and lands back in the same spot"
     },
     "attack": {
       "kind": "oneshot",
       "seconds": 2.0,
       "settle": 0.0,
-      "text": "the character performs one strong attack and returns to a ready stance"
+      "text": "the character stays in the same side view and keeps facing the same way, plants its feet and throws one powerful punch forward with its fist, then returns to a ready stance and stays in the same view"
     },
     "hit": {
       "kind": "oneshot",
       "seconds": 1.5,
       "settle": 0.0,
-      "text": "the character flinches back from a hit and recovers"
+      "text": "the character stays in the same side view and keeps facing the same way, flinches back from a hard hit and recovers"
     },
     "death": {
       "kind": "oneshot",
       "seconds": 2.5,
       "settle": 0.0,
-      "text": "the character collapses to the ground and lies still"
+      "text": "the character stays in the same side view and keeps facing the same way, collapses to the ground and lies still"
     }
   }
 }

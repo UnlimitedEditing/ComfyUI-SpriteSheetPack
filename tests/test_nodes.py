@@ -431,3 +431,30 @@ def test_spacing_is_optional_so_older_restored_workflows_still_validate():
     for name in ("SpritePackLoopFrames", "SpritePackAnimationSheet"):
         it = pkg.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()
         assert "spacing" in it.get("optional", {}) and "spacing" not in it["required"], name
+
+
+def test_oneshot_frames_follow_motion_and_skip_the_hold():
+    """Regression (live run): an 'attack' that never happened ended in a long hold; equal time steps filled the
+    row with copies of the final pose. The moving part must get the frames, the hold at most one."""
+    moving = _walker_frames(total=40, period=36)
+    held = [moving[-1]] * 40                                     # the character then stands still
+    frames = moving + held
+    segs = [{"label": "attack", "start": 0, "end": 80, "kind": "oneshot", "settle": 0}]
+    _, picks, _ = core.animation_pick(frames, segs, count=8)
+    idx = picks[0]["indices"]
+    assert picks[0]["report"]["kind_used"] == "motion"
+    assert idx == sorted(idx) and len(set(idx)) == 8 and idx[0] == 0
+    assert sum(1 for i in idx if i >= 41) <= 1, idx             # at most one frame of the 40-frame hold
+    _, even, _ = core.animation_pick(frames, segs, count=8, spacing="time")
+    assert sum(1 for i in even[0]["indices"] if i >= 41) >= 3    # equal time steps would have wasted several
+
+
+def test_period_search_ignores_periods_with_too_little_overlap():
+    """Regression (live run): 76 frames = 2.5 strides of 24 plus a ramp into another motion. Period 62 (11
+    overlapping pairs) beat the true 24. Only periods with enough overlap may win."""
+    walk = _walker_frames(total=64, period=24)
+    ramp = _walker_frames(total=12, period=11)                    # the character starts doing something else
+    frames = walk + ramp
+    segs = [{"label": "walk", "start": 0, "end": 76, "kind": "cycle", "settle": 8}]
+    _, picks, _ = core.animation_pick(frames, segs, count=8, min_period=16, max_period=64)
+    assert abs(picks[0]["report"]["period"] - 24) <= 1, picks[0]["report"]
