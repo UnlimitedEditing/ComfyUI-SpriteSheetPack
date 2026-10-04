@@ -474,6 +474,34 @@ def fit_canvas(rgba, width, height):
     return out
 
 
+def align_on_feet(frames, pad=1):
+    """Animation frames (RGBA, any sizes) -> equal-size cells on one shared pivot: ground line = the
+    bottom of each figure, x = the torso (mean x of the middle rows, steadier than the feet or limbs
+    while a figure walks). The cell grows to fit the largest frame, so nothing is cropped."""
+    crops = []
+    for f in frames:
+        x0, y0, x1, y1 = opaque_bbox(f)
+        crops.append(f[y0:y1, x0:x1])
+    pivots = []
+    for c in crops:
+        h = c.shape[0]
+        band = c[int(h * 0.25):max(int(h * 0.55), int(h * 0.25) + 1), :, 3]
+        ys, xs = np.nonzero(band)
+        pivots.append((float(xs.mean()) + 0.5 if len(xs) else c.shape[1] / 2.0, float(h)))
+    left = max(p[0] for p in pivots)
+    right = max(c.shape[1] - p[0] for c, p in zip(crops, pivots))
+    up = max(p[1] for p in pivots)
+    cw, ch = int(math.ceil(left + right)) + 2 * pad, int(math.ceil(up)) + 2 * pad
+    ox, oy = int(round(pad + left)), ch - pad
+    out = []
+    for c, (fx, fy) in zip(crops, pivots):
+        cell = np.zeros((ch, cw, 4), np.uint8)
+        dx, dy = ox - int(round(fx)), oy - c.shape[0]
+        cell[dy:dy + c.shape[0], dx:dx + c.shape[1]] = c[:ch - dy, :cw - dx]
+        out.append(cell)
+    return out
+
+
 def prepare_reference(rgba, sprite_width=0, render_scale=8, max_render_side=1024, margin=0.15,
                       bg_tolerance=24, max_colors=32, max_render_pixels=400_000, min_render_scale=4,
                       halo=True):

@@ -130,7 +130,7 @@ class SpritePackBuildSheet:
         front[idx >= 0, :3] = palette[idx[idx >= 0]]
         front[idx >= 0, 3] = 255
 
-        def snap(img):
+        def snap(img, fit=True):
             rgba = core.to_rgba(img[0].detach().cpu().float().numpy())
             rgba = core.remove_border_background(rgba, bg_tolerance)
             rgba = core.binarize_alpha(rgba, alpha_threshold)
@@ -140,14 +140,14 @@ class SpritePackBuildSheet:
                 snapped = core.clean_halo(snapped)
             if despeckle:
                 snapped = core.despeckle(snapped)
-            return core.fit_canvas(snapped, nw, nh), detail
+            return (core.fit_canvas(snapped, nw, nh) if fit else snapped), detail
 
         out, details = ([] if skip_native else [front]), []
         for name in sorted(frames, key=lambda n: int(n.rsplit("_", 1)[-1])):
             img = frames[name]
             if img is None:
                 continue
-            frame, detail = snap(img)
+            frame, detail = snap(img, fit=not skip_native)
             out.append(frame)
             details.append(dict(frame=name, **detail))
 
@@ -161,6 +161,9 @@ class SpritePackBuildSheet:
             if front_view is not None:  # the input wasn't a front view: use the dedicated front render
                 out[0], detail = snap(front_view)
                 details.append(dict(frame="front_view", **detail))
+        if skip_native and out:  # animation: shared ground line + torso x, cell grows to the biggest frame
+            out = core.align_on_feet(out)
+            nh, nw = out[0].shape[:2]
         sheet = core.build_sheet(out, columns)
         info = json.dumps({"frames": len(out), "cell": [nw, nh], "palette_size": len(palette), "order_offset": k,
                            "flipped_frames": flips,
@@ -349,6 +352,10 @@ class SpritePackPoseCycle:
             "facing": ("STRING", {"default": "right", "tooltip": "right or left (anything starting with l = left)."}),
             "bg_threshold": ("INT", {"default": 24, "min": 1, "max": 255, "tooltip":
                 "Colour distance from the border colour that counts as character when measuring its size."}),
+            "scale": ("FLOAT", {"default": 0.85, "min": 0.4, "max": 1.0, "step": 0.01, "tooltip":
+                "Skeleton height as a fraction of the character's height in the reference (feet stay on "
+                "the same ground line). Below 1 leaves headroom, so the model does not draw the figure "
+                "past the frame and crop the head."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "INT", "STRING")
@@ -356,12 +363,12 @@ class SpritePackPoseCycle:
     FUNCTION = "draw"
     CATEGORY = "image/sprite sheet"
 
-    def draw(self, reference, animation, frames, facing, bg_threshold):
+    def draw(self, reference, animation, frames, facing, bg_threshold, scale=0.85):
         ref = (reference[0].detach().cpu().float().numpy() * 255.0).round().astype(np.uint8)
         h, w = ref.shape[:2]
         bbox = poses.figure_bbox(ref, bg_threshold)
         facing = "left" if str(facing).strip().lower().startswith("l") else "right"
-        imgs = poses.render_cycle(animation, frames, (w, h), bbox, facing)
+        imgs = poses.render_cycle(animation, frames, (w, h), bbox, facing, scale=scale)
         info = json.dumps({"animation": animation, "frames": len(imgs), "canvas": [w, h], "figure_bbox": list(bbox)})
         print(f"[SpritePackPoseCycle] {info}")
         batch = torch.from_numpy(np.stack(imgs).astype(np.float32) / 255.0)

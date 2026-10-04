@@ -139,3 +139,25 @@ def test_build_sheet_skip_native():
     sheet, prev, frames, pal, info = build.build(to_t(native), 8, 32, 4, 2, 0.5, 24, False,
                                                  skip_native=True, frame_1=frame, frame_2=frame)
     assert frames.shape[0] == 2
+
+
+def test_skip_native_aligns_frames_on_feet_without_cropping():
+    build = pkg.NODE_CLASS_MAPPINGS["SpritePackBuildSheet"]()
+    native = tc.make_native(40, 34)
+    big = core.upscale_nearest(tc.make_native(44, 48), 8)           # frames taller than the native cell
+    sheet, prev, frames, pal, info = build.build(to_t(native), 8, 32, 2, 2, 0.5, 24, False, skip_native=True,
+                                                 frame_1=to_t(big)[..., :3], frame_2=to_t(big)[..., :3])
+    f = frames.numpy()
+    x0, y0, x1, y1 = core.opaque_bbox(core.upscale_nearest(tc.make_native(44, 48), 1))
+    assert f.shape[0] == 2 and f.shape[1] >= (y1 - y0) and f.shape[2] >= (x1 - x0)  # cell grew to the content
+    assert f.shape[1] > 30                                           # bigger than the native cell (~26 rows)
+    bottoms = [np.nonzero(fr[..., 3].any(1))[0].max() for fr in f]   # shared ground line
+    assert len(set(bottoms)) == 1
+
+
+def test_pose_scale_leaves_headroom():
+    import poses
+    full = poses.render_cycle("walk", 2, (256, 256), (50, 20, 200, 240), scale=1.0)[0]
+    small = poses.render_cycle("walk", 2, (256, 256), (50, 20, 200, 240), scale=0.7)[0]
+    top = lambda a: np.nonzero(a.any(-1).any(1))[0].min()
+    assert top(small) > top(full)

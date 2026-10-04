@@ -152,7 +152,7 @@ def figure_bbox(rgb, threshold=24):
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
-def render_cycle(animation, frames, size, bbox, facing="right", ground_y=None):
+def render_cycle(animation, frames, size, bbox, facing="right", ground_y=None, scale=1.0):
     """`frames` skeleton images (uint8 RGB, size = (w, h)) of one looping cycle, scaled to the figure
     bbox = (x0, y0, x1, y1): figure height = bbox height, feet on the bbox bottom, torso on the
     bbox centre. Frame i is phase i / frames, so frame 0 and frame N would be identical."""
@@ -160,7 +160,7 @@ def render_cycle(animation, frames, size, bbox, facing="right", ground_y=None):
         raise ValueError(f"animation must be one of {ANIMATIONS}, got {animation!r}")
     w, h = size
     x0, y0, x1, y1 = bbox
-    fig_h = float(y1 - y0)
+    fig_h = float(y1 - y0) * float(scale)
     cx = (x0 + x1) / 2.0
     ground = float(y1 if ground_y is None else ground_y)
     sign = 1.0 if facing == "right" else -1.0
