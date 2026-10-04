@@ -161,3 +161,64 @@ def test_pose_scale_leaves_headroom():
     small = poses.render_cycle("walk", 2, (256, 256), (50, 20, 200, 240), scale=0.7)[0]
     top = lambda a: np.nonzero(a.any(-1).any(1))[0].min()
     assert top(small) > top(full)
+
+
+def _walker_frames(total=96, period=40, size=(176, 208), drift=0.25):
+    """Synthetic walk-in-place video: grey torso, two differently coloured legs swinging out of
+    phase (so the SILHOUETTE repeats every half period but the colours only every full one), on
+    white, drifting sideways like a real generated video."""
+    import math
+    from PIL import Image, ImageDraw
+    out = []
+    for t in range(total):
+        im = Image.new("RGB", size, (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        cx, hip_y = 80 + drift * t, 110
+        d.rectangle([cx - 14, 50, cx + 14, hip_y], fill=(90, 120, 90))
+        d.ellipse([cx - 12, 22, cx + 12, 50], fill=(210, 170, 130))
+        for phase, color in ((0.0, (200, 40, 40)), (0.5, (40, 60, 200))):
+            ang = 0.55 * math.sin(2 * math.pi * (t / period + phase))
+            fx, fy = cx + 70 * math.sin(ang), hip_y + 70 * math.cos(ang)
+            d.line([cx, hip_y, fx, fy], fill=color, width=9)
+        out.append(np.asarray(im))
+    return out
+
+
+def test_find_loop_picks_full_stride_not_half():
+    frames = _walker_frames(period=40)
+    idx, rep = core.find_loop(frames, count=8, min_period=16, max_period=64)
+    assert abs(rep["period"] - 40) <= 2, rep            # half a stride (20) would be a silhouette match
+    assert len(idx) == 8 and len(set(idx)) == 8
+    assert rep["seam_error"] < 0.02, rep
+    # frame 0 is the widest stride
+    widths = []
+    for i in idx:
+        k = core.remove_border_background(core.to_rgba(frames[i]), 24)
+        xs = np.nonzero(k[..., 3].any(0))[0]
+        widths.append(xs.max() - xs.min())
+    assert widths[0] >= max(widths) - 2
+
+
+def test_find_loop_period_override_and_short_video_error():
+    frames = _walker_frames(total=90, period=30)
+    _, rep = core.find_loop(frames, count=6, period=30)
+    assert rep["period"] == 30 and len(rep["indices"]) == 6
+    try:
+        core.find_loop(frames[:20], count=8, min_period=16, max_period=64)
+    except ValueError as e:
+        assert "too short" in str(e)
+    else:
+        raise AssertionError("expected ValueError for a video shorter than one cycle")
+
+
+def test_loop_frames_node_then_build_sheet_from_video_frame():
+    frames = _walker_frames(period=36)
+    t = torch.from_numpy(np.stack(frames).astype(np.float32) / 255.0)
+    picked, first, scale, info = pkg.NODE_CLASS_MAPPINGS["SpritePackLoopFrames"]().pick(t, 6, 16, 64, 0, 40, 24)
+    assert picked.shape[0] == 6 and first.shape[0] == 1 and scale >= 1
+    build = pkg.NODE_CLASS_MAPPINGS["SpritePackBuildSheet"]()
+    kwargs = {f"frame_{i + 1}": picked[i:i + 1] for i in range(6)}
+    sheet, prev, fr, pal, binfo = build.build(first, scale, 16, 6, 2, 0.5, 24, False, skip_native=True, **kwargs)
+    assert fr.shape[0] == 6
+    palette = pal.numpy()[0]
+    assert not (palette[..., :3] > 0.99).all(axis=-1).any()   # the white background is not in the palette

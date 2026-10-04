@@ -474,6 +474,87 @@ def fit_canvas(rgba, width, height):
     return out
 
 
+def _loop_thumb(rgba, bg_tolerance, win_h, win_w, size=40):
+    """Foreground of one video frame as a small fixed-window RGB thumbnail aligned on the figure
+    (x = mask centroid, y = bottom of the figure), background zero. For comparing walk poses."""
+    keyed = remove_border_background(rgba, bg_tolerance)
+    mask = keyed[..., 3] > 0
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return np.zeros(size * size * 3, np.float32), (0, 0)
+    cx, bottom = int(round(xs.mean())), int(ys.max()) + 1
+    x0, y0 = cx - win_w // 2, bottom - win_h
+    canvas = np.zeros((win_h, win_w, 3), np.uint8)
+    sx0, sy0 = max(0, x0), max(0, y0)
+    sx1, sy1 = min(rgba.shape[1], x0 + win_w), min(rgba.shape[0], bottom)
+    sub = keyed[sy0:sy1, sx0:sx1]
+    region = sub[..., :3] * (sub[..., 3:4] > 0)
+    canvas[sy0 - y0:sy0 - y0 + region.shape[0], sx0 - x0:sx0 - x0 + region.shape[1]] = region
+    thumb = np.asarray(Image.fromarray(canvas).resize((size, size), Image.BILINEAR), np.float32) / 255.0
+    return thumb.reshape(-1), (int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+
+
+def find_loop(frames, count=8, min_period=16, max_period=64, window=4, period=0, bg_tolerance=24,
+              target_height=64, skip=3):
+    """One seamless walk cycle in a video (list of RGB/RGBA uint8 frames, the character on a plain
+    background) -> (frame indices, report dict).
+
+    Walking in place repeats every full stride, but the *silhouette* repeats every step (left and
+    right legs swap), so frames are compared in colour, and matched as a `window`-frame run: one
+    pose occurs twice per stride (swinging forward and back), so a single-frame match finds loops
+    that jump backwards at the seam. Period = the smallest local error minimum within 25% of the
+    best. The loop starts at the best seam, then rotates to the widest stride so the sheet opens on
+    a contact pose. `count` indices are spread evenly over the cycle."""
+    rgbas = [to_rgba(f) for f in frames]
+    boxes = []
+    for r in rgbas:
+        keyed = remove_border_background(r, bg_tolerance)
+        ys, xs = np.nonzero(keyed[..., 3] > 0)
+        boxes.append((int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)) if len(xs) else (0, 0))
+    bw = np.array([b[0] for b in boxes])
+    bh = np.array([b[1] for b in boxes])
+    win_h = max(8, int(np.median(bh) * 1.1))
+    win_w = max(8, int(np.percentile(bw, 90) * 1.15))
+    thumbs, spans = zip(*[_loop_thumb(r, bg_tolerance, win_h, win_w) for r in rgbas])
+    v = np.stack(thumbs)
+    t_total = len(v)
+    window = max(1, min(window, t_total // 4))
+    hi = min(int(max_period), t_total - window - skip - 1)
+    lo = max(2, int(min_period))
+    errs = {}
+    if period and period > 0:
+        p = int(period)
+    else:
+        if hi < lo:
+            raise ValueError(f"video too short for a loop: {t_total} frames (min_period {lo}, "
+                             f"needs more than {lo + window + skip + 1})")
+        for q in range(lo, hi + 1):
+            n_t = t_total - q - window + 1
+            e = np.mean([np.abs(v[k:k + n_t] - v[q + k:q + k + n_t]).mean() for k in range(window)])
+            errs[q] = float(e)
+        best = min(errs.values())
+        cands = [q for q in errs if errs[q] <= best * 1.25 + 1e-9
+                 and errs[q] <= errs.get(q - 1, 9e9) and errs[q] <= errs.get(q + 1, 9e9)]
+        p = min(cands)
+    last = t_total - p - window
+    if last < skip:
+        raise ValueError(f"period {p} leaves no room for a loop in {t_total} frames")
+    # best seam: the start whose window matches the same window one period later
+    seam = [np.mean([np.abs(v[s + k] - v[s + p + k]).mean() for k in range(window)])
+            for s in range(skip, last + 1)]
+    s = skip + int(np.argmin(seam))
+    # rotate to the widest stride so frame 0 is a contact pose
+    widest = s + int(np.argmax([spans[s + j][0] for j in range(p)]))
+    idx = [s + ((widest - s + int(round(i * p / float(count)))) % p) for i in range(int(count))]
+    height = float(np.median(bh[bh > 0])) if (bh > 0).any() else float(target_height)
+    scale = max(1, int(round(height / max(1, target_height))))
+    report = {"frames_in": t_total, "period": p, "start": s, "widest": widest, "indices": idx,
+              "seam_error": round(float(min(seam)), 4),
+              "best_period_error": round(min(errs.values()), 4) if errs else None,
+              "figure_px": [int(np.median(bw)), int(height)], "render_scale": scale}
+    return idx, report
+
+
 def align_on_feet(frames, pad=1):
     """Animation frames (RGBA, any sizes) -> equal-size cells on one shared pivot: ground line = the
     bottom of each figure, x = the torso (mean x of the middle rows, steadier than the feet or limbs

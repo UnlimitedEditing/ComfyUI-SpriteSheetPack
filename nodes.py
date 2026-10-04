@@ -122,7 +122,10 @@ class SpritePackBuildSheet:
     def build(self, native_sprite, render_scale, max_colors, columns, preview_scale, alpha_threshold,
               bg_tolerance, despeckle, clean_halo=True, order_offset=0, front_view=None,
               facing_report=None, skip_native=False, **frames):
-        native = core.binarize_alpha(_tensor_to_rgba(native_sprite), alpha_threshold)
+        native = _tensor_to_rgba(native_sprite)
+        if native[..., 3].min() == 255:  # a plain video frame: key out the border background first
+            native = core.remove_border_background(native, bg_tolerance)
+        native = core.binarize_alpha(native, alpha_threshold)
         nh, nw = native.shape[:2]
         palette = core.build_palette(native, max_colors)
         idx = core.palette_indices(native, palette)
@@ -375,6 +378,44 @@ class SpritePackPoseCycle:
         return (batch, len(imgs), info)
 
 
+class SpritePackLoopFrames:
+    """A video of a character walking in place on a plain background -> `count` frames of one
+    seamless cycle, ready for SpritePackBuildSheet (skip_native). Finds the stride period by matching
+    short runs of frames in colour, starts at the best seam and opens on the widest stride. Also
+    suggests the render scale (rendered px per art px) for a target sprite height."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "frames": ("IMAGE",),
+            "count": ("INT", {"default": 8, "min": 2, "max": 15, "tooltip": "Frames in the sheet."}),
+            "min_period": ("INT", {"default": 16, "min": 4, "max": 400, "tooltip":
+                "Shortest cycle to consider, in video frames. Keep above half a step."}),
+            "max_period": ("INT", {"default": 64, "min": 8, "max": 800, "tooltip":
+                "Longest cycle to consider, in video frames."}),
+            "period_override": ("INT", {"default": 0, "min": 0, "max": 800, "tooltip":
+                "Force the cycle length in video frames. 0 = detect."}),
+            "target_height": ("INT", {"default": 64, "min": 8, "max": 512, "tooltip":
+                "Wanted sprite height in art pixels; sets the suggested render_scale."}),
+            "bg_tolerance": ("INT", {"default": 24, "min": 0, "max": 255}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("frames", "first_frame", "render_scale", "info")
+    FUNCTION = "pick"
+    CATEGORY = "image/sprite sheet"
+
+    def pick(self, frames, count, min_period, max_period, period_override, target_height, bg_tolerance):
+        arr = (frames.detach().cpu().float().numpy() * 255.0).round().astype(np.uint8)
+        idx, report = core.find_loop(list(arr), count=count, min_period=min_period, max_period=max_period,
+                                     period=period_override, bg_tolerance=bg_tolerance,
+                                     target_height=target_height)
+        info = json.dumps(report)
+        print(f"[SpritePackLoopFrames] {info}")
+        picked = frames[idx]
+        return (picked, picked[:1], report["render_scale"], info)
+
+
 NODE_CLASS_MAPPINGS = {
     "SpritePackPrepare": SpritePackPrepare,
     "SpritePackBuildSheet": SpritePackBuildSheet,
@@ -382,6 +423,7 @@ NODE_CLASS_MAPPINGS = {
     "SpritePackSaveImage": SpritePackSaveImage,
     "SpritePackGate": SpritePackGate,
     "SpritePackPoseCycle": SpritePackPoseCycle,
+    "SpritePackLoopFrames": SpritePackLoopFrames,
     "SpritePackStandardizeSheet": SpritePackStandardizeSheet,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -391,5 +433,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SpritePackSaveImage": "Sprite Pack: Save Image (switchable)",
     "SpritePackGate": "Sprite Pack: Gate (pass or empty)",
     "SpritePackPoseCycle": "Sprite Pack: Pose Cycle (OpenPose skeletons)",
+    "SpritePackLoopFrames": "Sprite Pack: Loop Frames (walk cycle from video)",
     "SpritePackStandardizeSheet": "Sprite Pack: Standardize Sheet",
 }
