@@ -1,6 +1,7 @@
 {
   "version": 1,
   "_about": "Prompt book for SpritePackPromptBook. Edit freely: tags in the workflow slots (slot1 = actions, slot2 = views, slot3 = style) are looked up here. 'seconds' is how long an action runs in the video, 'settle' is how long to wait before the loop finder starts looking (the character is still moving into the action), 'kind' is 'cycle' (loops: walk, run, idle) or 'oneshot' (plays once: attack, jump...).",
+  "_timeline_note": "Timestamp syntax verified from a working H3 prompt (Jacob, 2026-10-04): 'integrated_multimodal_description: [Shot 1] <scene + first action> [Shot 2] At 00:04.000, <text> ...' then 'overall_soundscape:' and 'non_diegetic_music:' lines. Shot 1 carries the scene; later shots start 'At MM:SS.mmm,'.",
   "fps": 24,
   "frame_rule": {
     "base": 5,
@@ -9,12 +10,14 @@
     "_note": "H3 lengths are base + step*k frames; ~396 is the practical max at 512x512"
   },
   "turn_seconds": 1.0,
-  "timeline_template": "[{start}s-{end}s] {text}",
-  "_timeline_template_note": "PLACEHOLDER: replace with the exact timestamp syntax H3 honours. Available fields: {start} {end} (seconds, one decimal) and {text}. Segments are joined with 'joiner'.",
-  "joiner": " ",
-  "preamble": "{subject} is the reference character. The scene is a plain pure white background, full body in frame from head to feet, static camera, flat even lighting, no shadows, no motion blur, no text. {style}",
-  "camera_first": "Camera: {view}.",
-  "camera_change": "The camera moves to {view}.",
+  "description_prefix": "integrated_multimodal_description: ",
+  "shot_first": "[Shot {n}] {text}",
+  "shot_next": "[Shot {n}] At {time}, {text}",
+  "preamble": "Clean 2D game-asset animation on a plain pure white background. {subject} is the reference character. Full body in frame from head to feet, static camera, flat even lighting, no shadows, no motion blur, no text. {style}",
+  "camera_first": "The shot frames {view}.",
+  "camera_change": "The shot cuts to {view}.",
+  "soundscape": "Silent. No sound effects, no speech.",
+  "music": "None. No music.",
   "styles": {
     "pixel-white": "Crisp pixel art style with hard pixel edges and a limited colour palette.",
     "toon-white": "Clean 2D cartoon style with flat colours and bold outlines.",

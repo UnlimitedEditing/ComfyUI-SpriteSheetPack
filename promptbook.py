@@ -24,6 +24,12 @@ def parse_tags(text):
     return [t for t in re.split(r"[+,;\s]+", (text or "").strip().lower()) if t]
 
 
+def fmt_time(seconds):
+    """4.0 -> '00:04.000' (the MM:SS.mmm stamp H3 reads)."""
+    ms = int(round(seconds * 1000))
+    return f"{ms // 60000:02d}:{(ms % 60000) // 1000:02d}.{ms % 1000:03d}"
+
+
 def snap_length(frames, rule):
     """Smallest valid H3 length >= frames (base + step*k)."""
     base, step = int(rule["base"]), int(rule["step"])
@@ -84,8 +90,14 @@ def build_plan(actions, views, style, subject="<Picture 1>", extra="", fps=None,
             seg["label"] = f"{orig[i]}_{seg['view']}" if distinct_views else f"{orig[i]}{twins.index(i) + 1}"
     segments[-1]["end"] = length                      # the snapped-up tail belongs to the last action
     parts[-1] = (parts[-1][0], length, parts[-1][2])
-    tmpl, joiner = book["timeline_template"], book.get("joiner", " ")
-    timeline = joiner.join(tmpl.format(start=f"{a / fps:.1f}", end=f"{b / fps:.1f}", text=t) for a, b, t in parts)
-    prompt = book["preamble"].format(subject=who, style=style_text).strip() + " " + timeline
+    shots = []
+    for n, (start, _end, text) in enumerate(parts):
+        if n == 0:
+            scene = book["preamble"].format(subject=who, style=style_text).strip()
+            shots.append(book["shot_first"].format(n=1, text=f"{scene} {text}"))
+        else:
+            shots.append(book["shot_next"].format(n=n + 1, time=fmt_time(start / fps), text=text[0].lower() + text[1:]))
+    prompt = (book["description_prefix"] + " ".join(shots) + "\noverall_soundscape: " + book["soundscape"]
+              + "\nnon_diegetic_music: " + book["music"])
     info = {"fps": fps, "length": length, "seconds": round(length / fps, 2), "segments": segments}
     return {"prompt": prompt, "segments": segments, "length": length, "info": info}

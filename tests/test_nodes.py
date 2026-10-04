@@ -313,7 +313,7 @@ def test_promptbook_views_pair_with_actions_and_camera_change_adds_settle():
     assert views == ["side", "front", "front"]                  # shorter view list repeats its last entry
     s0, s1, s2 = plan["segments"]
     assert s1["settle"] > s2["settle"]                          # a camera move costs settle time, staying on `front` does not
-    assert "The camera moves to a straight front view" in plan["prompt"]
+    assert "the shot cuts to a straight front view" in plan["prompt"]
 
 
 def test_promptbook_errors_are_readable():
@@ -348,3 +348,14 @@ def test_promptbook_labels_are_unique():
     assert f("walk+walk", "side+front") == ["walk_side", "walk_front"]
     assert f("walk+walk", "side") == ["walk1", "walk2"]
     assert f("walk+run", "side") == ["walk", "run"]
+
+
+def test_promptbook_uses_the_verified_h3_timestamp_syntax():
+    import promptbook
+    assert promptbook.fmt_time(4.0) == "00:04.000" and promptbook.fmt_time(5.5) == "00:05.500" and promptbook.fmt_time(65.25) == "01:05.250"
+    p = promptbook.build_plan("walk+run+attack", "side+side+front", "pixel-white")["prompt"]
+    assert p.startswith("integrated_multimodal_description: [Shot 1] ")
+    assert "[Shot 2] At 00:03.500, the character runs in place" in p        # later shots: stamp, then lowercase text
+    assert "[Shot 3] At 00:06.500, the shot cuts to a straight front view" in p
+    assert "[Shot 1] Clean 2D game-asset animation" in p and "<Picture 1> is the reference character" in p
+    assert p.rstrip().endswith("non_diegetic_music: None. No music.") and "overall_soundscape: Silent." in p
