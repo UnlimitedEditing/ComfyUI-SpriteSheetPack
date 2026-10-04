@@ -37,19 +37,19 @@
       "kind": "cycle",
       "seconds": 2.5,
       "settle": 0.3,
-      "text": "the character stands in place in a relaxed idle pose, breathing gently with tiny natural movement, looping seamlessly"
+      "text": "the character stands in place in a relaxed idle pose, breathing gently with tiny natural movement, looping seamlessly until the very end of the shot"
     },
     "walk": {
       "kind": "cycle",
       "seconds": 3.5,
       "settle": 0.8,
-      "text": "the character walks in place at a steady pace with a smooth natural walk cycle, taking even steps without travelling across the frame"
+      "text": "the character walks in place at a steady pace with a smooth natural walk cycle, taking even steps without travelling across the frame, and keeps going steadily without changing pace until the very end of the shot"
     },
     "run": {
       "kind": "cycle",
       "seconds": 3.0,
       "settle": 0.8,
-      "text": "the character runs in place with a smooth even run cycle, without travelling across the frame"
+      "text": "the character runs in place with a smooth even run cycle, without travelling across the frame, and keeps going steadily without changing pace until the very end of the shot"
     },
     "jump": {
       "kind": "oneshot",
