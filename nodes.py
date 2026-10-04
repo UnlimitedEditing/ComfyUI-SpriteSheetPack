@@ -88,6 +88,10 @@ class SpritePackBuildSheet:
         optional["skip_native"] = ("BOOLEAN", {"default": False, "tooltip":
             "Leave the native sprite out of the sheet (it still sets the palette and cell size). For "
             "animation cycles, where every frame is generated and the static reference is not one of them."})
+        optional["uniform_scale"] = ("FLOAT", {"default": 0.0, "min": 0.0, "max": 64.0, "step": 0.001, "tooltip":
+            "Video frames: rendered pixels per art pixel, used for EVERY frame (area downsample onto the "
+            "shared palette). 0 = fit a pixel grid to each frame (right for AI pixel art, wrong for video, "
+            "where it stretches and squashes frames individually)."})
         optional["front_view"] = ("IMAGE", {"tooltip":
             "Optional dedicated straight-front render. When order_offset is not 0 (the input was not a "
             "front view), it replaces output position 0, so the sheet always starts with a true front."})
@@ -121,7 +125,7 @@ class SpritePackBuildSheet:
 
     def build(self, native_sprite, render_scale, max_colors, columns, preview_scale, alpha_threshold,
               bg_tolerance, despeckle, clean_halo=True, order_offset=0, front_view=None,
-              facing_report=None, skip_native=False, **frames):
+              facing_report=None, skip_native=False, uniform_scale=0.0, **frames):
         native = _tensor_to_rgba(native_sprite)
         if native[..., 3].min() == 255:  # a plain video frame: key out the border background first
             native = core.remove_border_background(native, bg_tolerance)
@@ -137,8 +141,12 @@ class SpritePackBuildSheet:
             rgba = core.to_rgba(img[0].detach().cpu().float().numpy())
             rgba = core.remove_border_background(rgba, bg_tolerance)
             rgba = core.binarize_alpha(rgba, alpha_threshold)
-            # tracked lines, not a fixed grid: the image model's blocks drift like any AI pixel art
-            snapped, detail = core.snap_tracked(rgba, render_scale, palette)
+            if uniform_scale and uniform_scale > 0:
+                snapped = core.uniform_snap(rgba, uniform_scale, palette, alpha_threshold)
+                detail = {"cells": [snapped.shape[1], snapped.shape[0]], "period": round(float(uniform_scale), 3)}
+            else:
+                # tracked lines, not a fixed grid: the image model's blocks drift like any AI pixel art
+                snapped, detail = core.snap_tracked(rgba, render_scale, palette)
             if clean_halo:
                 snapped = core.clean_halo(snapped)
             if despeckle:
@@ -400,8 +408,8 @@ class SpritePackLoopFrames:
             "bg_tolerance": ("INT", {"default": 24, "min": 0, "max": 255}),
         }}
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "STRING")
-    RETURN_NAMES = ("frames", "first_frame", "render_scale", "info")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "STRING", "FLOAT")
+    RETURN_NAMES = ("frames", "first_frame", "render_scale", "info", "pixel_scale")
     FUNCTION = "pick"
     CATEGORY = "image/sprite sheet"
 
@@ -413,7 +421,7 @@ class SpritePackLoopFrames:
         info = json.dumps(report)
         print(f"[SpritePackLoopFrames] {info}")
         picked = frames[idx]
-        return (picked, picked[:1], report["render_scale"], info)
+        return (picked, picked[:1], report["render_scale"], info, report["pixel_scale"])
 
 
 NODE_CLASS_MAPPINGS = {

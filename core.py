@@ -548,11 +548,36 @@ def find_loop(frames, count=8, min_period=16, max_period=64, window=4, period=0,
     idx = [s + ((widest - s + int(round(i * p / float(count)))) % p) for i in range(int(count))]
     height = float(np.median(bh[bh > 0])) if (bh > 0).any() else float(target_height)
     scale = max(1, int(round(height / max(1, target_height))))
+    pixel_scale = max(1.0, height / float(max(1, target_height)))
     report = {"frames_in": t_total, "period": p, "start": s, "widest": widest, "indices": idx,
               "seam_error": round(float(min(seam)), 4),
               "best_period_error": round(min(errs.values()), 4) if errs else None,
-              "figure_px": [int(np.median(bw)), int(height)], "render_scale": scale}
+              "figure_px": [int(np.median(bw)), int(height)], "render_scale": scale,
+              "pixel_scale": round(pixel_scale, 3)}
     return idx, report
+
+
+def uniform_snap(rgba, scale, palette, alpha_threshold=0.5):
+    """Video frame (RGBA, background already keyed) -> native-pixel RGBA at ONE fixed scale: the whole
+    canvas is area-averaged down by `scale` (premultiplied, so edges stay clean), alpha is cut at
+    `alpha_threshold`, and colours snap to the nearest palette entry. Unlike snap_tracked this never
+    fits a grid to the individual frame, so every frame of a cycle has the same size and proportions
+    (tracked snapping rescales each frame's axes on its own, which stretches and squashes a walk)."""
+    h, w = rgba.shape[:2]
+    nw, nh = max(1, int(round(w / float(scale)))), max(1, int(round(h / float(scale))))
+    a = rgba[..., 3:4].astype(np.float32) / 255.0
+    pm = np.concatenate([rgba[..., :3].astype(np.float32) * a, a * 255.0], axis=-1)
+    chans = [np.asarray(Image.fromarray(pm[..., c], mode="F").resize((nw, nh), Image.BOX), np.float32)
+             for c in range(4)]
+    alpha = chans[3] / 255.0
+    rgb = np.stack(chans[:3], axis=-1) / np.maximum(alpha[..., None], 1e-6)
+    out = np.zeros((nh, nw, 4), np.uint8)
+    out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    out[..., 3] = np.where(alpha >= alpha_threshold, 255, 0).astype(np.uint8)
+    idx = palette_indices(out, palette)
+    out[idx < 0, 3] = 0
+    out[idx >= 0, :3] = palette[idx[idx >= 0]]
+    return out
 
 
 def align_on_feet(frames, pad=1):

@@ -214,7 +214,7 @@ def test_find_loop_period_override_and_short_video_error():
 def test_loop_frames_node_then_build_sheet_from_video_frame():
     frames = _walker_frames(period=36)
     t = torch.from_numpy(np.stack(frames).astype(np.float32) / 255.0)
-    picked, first, scale, info = pkg.NODE_CLASS_MAPPINGS["SpritePackLoopFrames"]().pick(t, 6, 16, 64, 0, 40, 24)
+    picked, first, scale, info, _pscale = pkg.NODE_CLASS_MAPPINGS["SpritePackLoopFrames"]().pick(t, 6, 16, 64, 0, 40, 24)
     assert picked.shape[0] == 6 and first.shape[0] == 1 and scale >= 1
     build = pkg.NODE_CLASS_MAPPINGS["SpritePackBuildSheet"]()
     kwargs = {f"frame_{i + 1}": picked[i:i + 1] for i in range(6)}
@@ -222,3 +222,17 @@ def test_loop_frames_node_then_build_sheet_from_video_frame():
     assert fr.shape[0] == 6
     palette = pal.numpy()[0]
     assert not (palette[..., :3] > 0.99).all(axis=-1).any()   # the white background is not in the palette
+
+
+def test_uniform_scale_keeps_every_frame_the_same_size():
+    frames = _walker_frames(period=36)
+    t = torch.from_numpy(np.stack(frames).astype(np.float32) / 255.0)
+    picked, first, scale, info, pscale = pkg.NODE_CLASS_MAPPINGS["SpritePackLoopFrames"]().pick(t, 6, 16, 64, 0, 40, 24)
+    assert pscale >= 1.0
+    build = pkg.NODE_CLASS_MAPPINGS["SpritePackBuildSheet"]()
+    kwargs = {f"frame_{i + 1}": picked[i:i + 1] for i in range(6)}
+    *_, binfo = build.build(first, scale, 16, 6, 2, 0.5, 24, False, skip_native=True, uniform_scale=pscale, **kwargs)
+    import json as _json
+    cells = [d["cells"] for d in _json.loads(binfo)["details"]]
+    assert len({tuple(c) for c in cells}) == 1                 # identical grid for every frame, no per-frame refit
+    assert all(abs(d["period"] - pscale) < 1e-3 for d in _json.loads(binfo)["details"])
